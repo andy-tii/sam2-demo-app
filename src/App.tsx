@@ -256,7 +256,7 @@ export default function App() {
         <button onClick={clearPoints} disabled={!imageUrl || status === "uploading"}>
           Clear points
         </button>
-        <span style={{ fontSize: 12, color: "#6b7280" }}></span>
+        <span style={{ fontSize: 12, color: "#6b7280" }}>(Right-click & drag to move image)</span>
       </div>
 
       {/* Centered body */}
