@@ -5,20 +5,16 @@ export default defineConfig({
   plugins: [react()],
   server: {
     host: true, // 0.0.0.0 so ngrok can reach it
-    allowedHosts: ["08877f059ff7.ngrok-free.app"],
+    allowedHosts: ["e2227d75fdc1.ngrok-free.app"],
 
     proxy: {
-      "/click": {
-        target: "http://localhost:8000",
-        changeOrigin: true,
-      },
-      "/preview": {
-        target: "http://localhost:8000",
-        changeOrigin: true,
-      },
-    },
-
-    // If HMR doesn’t work over ngrok, uncomment:
-    // hmr: { host: "08877f059ff7.ngrok-free.app", protocol: "wss", clientPort: 443 },
+    "/click":   { target: "http://localhost:8000", changeOrigin: true },
+    "/preview": { target: "http://localhost:8000", changeOrigin: true },
+    "/save":    { target: "http://localhost:8000", changeOrigin: true },
+    "/masks":   { target: "http://localhost:8000", changeOrigin: true },  // <- added
+    "/delete":  { target: "http://localhost:8000", changeOrigin: true },  // <- added
+    "/log":   { target: "http://localhost:8000", changeOrigin: true },  // <- added
+    "/status":  { target: "http://localhost:8000", changeOrigin: true },  // <- added
+  }
   },
 });
