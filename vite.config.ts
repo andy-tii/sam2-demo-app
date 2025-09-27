@@ -1,10 +1,24 @@
-import { defineConfig } from 'vite'
+import { defineConfig } from "vite";
+import react from "@vitejs/plugin-react";
 
 export default defineConfig({
+  plugins: [react()],
   server: {
-    host: true, // listen on 0.0.0.0 so the tunnel can reach Vite
-    allowedHosts: ['2c7d4e0c2fe1.ngrok-free.app'],
-    // If HMR struggles through the tunnel, try:
-    // hmr: { host: '2fdbc2d26433.ngrok-free.app', protocol: 'wss', clientPort: 443 }
+    host: true, // 0.0.0.0 so ngrok can reach it
+    allowedHosts: ["08877f059ff7.ngrok-free.app"],
+
+    proxy: {
+      "/click": {
+        target: "http://localhost:8000",
+        changeOrigin: true,
+      },
+      "/preview": {
+        target: "http://localhost:8000",
+        changeOrigin: true,
+      },
+    },
+
+    // If HMR doesn’t work over ngrok, uncomment:
+    // hmr: { host: "08877f059ff7.ngrok-free.app", protocol: "wss", clientPort: 443 },
   },
-})
+});

@@ -1,105 +1,142 @@
 import React, { useEffect, useRef, useState } from "react";
+import axios from "axios";
+import metadata from "./data/metadata.json";
 
-type DispPt = { x: number; y: number }; // display-space coords (for drawing dots)
-type ImgPt = { x: number; y: number };  // image-space coords (for backend)
+type DispPt = { x: number; y: number };
+type ImgPt = { x: number; y: number };
+type Example = {
+  image_name: string;
+  image_path: string;
+  objects?: string[];
+};
+
+type Status = "Ready" | "Loading image..." | "Processing..." | "Previewing...";
+
+const MAX_DISPLAY_W = 900;
+const MAX_DISPLAY_H = 700;
 
 export default function App() {
   const imgRef = useRef<HTMLImageElement | null>(null);
 
-  // session + data
-  const [imageUrl, setImageUrl] = useState<string>("");
-  const [sessionId, setSessionId] = useState<string>("");
+  // navigation
+  const [chunkId, setChunkId] = useState<number>(0);
+  const [exampleIdx, setExampleIdx] = useState<number>(0);
+  const [currentExample, setCurrentExample] = useState<Example | null>(null);
 
-  // overlays
-  const [masks, setMasks] = useState<string[]>([]);          // committed mask (latest composite)
-  const [previewMask, setPreviewMask] = useState<string| null>(null); // hover preview mask
-
-  // points
+  // overlays & points
+  const [mask, setMask] = useState<string | null>(null);
+  const [previewMask, setPreviewMask] = useState<string | null>(null);
   const [dots, setDots] = useState<DispPt[]>([]);
   const [points, setPoints] = useState<ImgPt[]>([]);
 
-  // status: single row
-  const [status, setStatus] = useState<"" | "uploading" | "processing" | "preview">("");
+  // sizing & loading
+  const [naturalSize, setNaturalSize] = useState<{ w: number; h: number } | null>(null);
+  const [displaySize, setDisplaySize] = useState<{ w: number; h: number } | null>(null);
+  const [scale, setScale] = useState<number>(1);
+  const [imageKey, setImageKey] = useState<number>(0);
+  const [status, setStatus] = useState<Status>("Ready");
 
-  // hover preview timer
+  // hover timer
   const hoverTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // simple pan (right-click & drag)
-  const [pan, setPan] = useState({ x: 0, y: 0 });
-  const dragInfo = useRef<{ dragging: boolean; startX: number; startY: number; panX: number; panY: number } | null>(null);
+  useEffect(() => {
+    const chunk = (metadata as any)[chunkId.toString()];
+    if (!chunk) return;
+    const ex = chunk[exampleIdx] || null;
+    setCurrentExample(ex);
 
-  // ---- Upload ----
-  const onFileChange = async (file?: File) => {
-    if (!file) return;
-
-    setStatus("uploading");
-    const localUrl = URL.createObjectURL(file);
-    setImageUrl(localUrl);
-    setMasks([]);
+    setMask(null);
     setPreviewMask(null);
     setDots([]);
     setPoints([]);
+    setNaturalSize(null);
+    setDisplaySize(null);
+    setScale(1);
+    setStatus("Loading image...");
+    setImageKey((k) => k + 1);
+  }, [chunkId, exampleIdx]);
 
-    try {
-      const form = new FormData();
-      form.append("file", file);
-      const res = await fetch("http://localhost:8000/upload", { method: "POST", body: form });
-      const data = await res.json();
-      if (data.error) throw new Error(data.error);
-      setSessionId(data.session_id);
-    } catch (err) {
-      console.error("Upload failed:", err);
-      alert("Upload failed. Check console for details.");
-      setSessionId("");
-    } finally {
-      setStatus("");
-    }
+  const computeDisplayFromNatural = (nw: number, nh: number) => {
+    const s = Math.min(1, MAX_DISPLAY_W / nw, MAX_DISPLAY_H / nh);
+    return { w: Math.round(nw * s), h: Math.round(nh * s), s };
   };
 
-  // ---- Coords helpers ----
   const getCoords = (e: React.MouseEvent<HTMLImageElement>) => {
     const img = imgRef.current;
-    if (!img) return { imgX: 0, imgY: 0, dispX: 0, dispY: 0 };
+    if (!img || !naturalSize || !displaySize)
+      return { imgX: -1, imgY: -1, dispX: 0, dispY: 0 };
 
-    // rect reflects CSS transforms, so this works even when panned
     const rect = img.getBoundingClientRect();
     const dispX = e.clientX - rect.left;
     const dispY = e.clientY - rect.top;
 
-    // if cursor is outside image bounds, bail out (no preview)
     if (dispX < 0 || dispY < 0 || dispX > rect.width || dispY > rect.height) {
       return { imgX: -1, imgY: -1, dispX, dispY };
     }
 
-    const scaleX = img.naturalWidth / rect.width;
-    const scaleY = img.naturalHeight / rect.height;
+    const imgX = Math.round(dispX / scale);
+    const imgY = Math.round(dispY / scale);
 
-    return {
-      imgX: Math.round(dispX * scaleX),
-      imgY: Math.round(dispY * scaleY),
-      dispX,
-      dispY,
-    };
+    return { imgX, imgY, dispX, dispY };
   };
 
   const findNearbyIndex = (dispX: number, dispY: number, tol = 8) =>
     dots.findIndex((p) => Math.hypot(p.x - dispX, p.y - dispY) <= tol);
 
-  // ---- Click (toggle point) ----
-  const onImageClick = async (e: React.MouseEvent<HTMLImageElement>) => {
-    if (!sessionId || status === "uploading") return;
+  // ---------- API helpers with axios ----------
+  async function requestCommit(newPoints: ImgPt[]) {
+    const res = await axios.post("/click", {
+      chunk_id: chunkId,
+      index: exampleIdx,
+      points: newPoints,
+      width: naturalSize?.w,
+      height: naturalSize?.h,
+      image_name: currentExample?.image_name,
+    });
+    return res.data;
+  }
 
-    // ignore right-click for panning
-    if (e.button === 2) return;
+  async function requestPreview(allPointsPlusHover: ImgPt[]) {
+    try {
+      const r = await axios.post("/preview", {
+        chunk_id: chunkId,
+        index: exampleIdx,
+        points: allPointsPlusHover,
+        width: naturalSize?.w,
+        height: naturalSize?.h,
+        image_name: currentExample?.image_name,
+      });
+      return r.data;
+    } catch (_) {
+      const res = await axios.post("/click?preview=1", {
+        chunk_id: chunkId,
+        index: exampleIdx,
+        points: allPointsPlusHover,
+        width: naturalSize?.w,
+        height: naturalSize?.h,
+        image_name: currentExample?.image_name,
+      });
+      return res.data;
+    }
+  }
+
+  // ------------- click toggle -------------
+  const onImageClick = async (e: React.MouseEvent<HTMLImageElement>) => {
+    if (!currentExample || status !== "Ready" || !naturalSize || !displaySize) return;
 
     const { imgX, imgY, dispX, dispY } = getCoords(e);
-    // ignore clicks outside the image
     if (imgX < 0 || imgY < 0) return;
 
-    // toggle logic
+    setPreviewMask(null);
+    if (hoverTimer.current) {
+      clearTimeout(hoverTimer.current);
+      hoverTimer.current = null;
+    }
+
     const idx = findNearbyIndex(dispX, dispY);
     const newPoints = [...points];
     const newDots = [...dots];
+
     if (idx !== -1) {
       newPoints.splice(idx, 1);
       newDots.splice(idx, 1);
@@ -110,39 +147,33 @@ export default function App() {
 
     setPoints(newPoints);
     setDots(newDots);
-    setPreviewMask(null); // clear any hover preview on commit
 
     if (newPoints.length === 0) {
-      setMasks([]);
+      setMask(null);
       return;
     }
 
-    setStatus("processing");
+    setStatus("Processing...");
     try {
-      const res = await fetch("http://localhost:8000/click", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ session_id: sessionId, points: newPoints }),
-      });
-      const data = await res.json();
+      const data = await requestCommit(newPoints);
       if (data.mask_png_b64) {
-        setMasks([`data:image/png;base64,${data.mask_png_b64}`]);
+        setMask(`data:image/png;base64,${data.mask_png_b64}`);
+      } else {
+        setMask(null);
       }
     } catch (err) {
-      console.error("Click request failed:", err);
-      setMasks([]);
+      console.error("Commit request failed:", err);
+      setMask(null);
     } finally {
-      setStatus("");
+      setStatus("Ready");
     }
   };
 
-  // ---- Hover preview (3s idle) ----
+  // ------------- hover preview -------------
   const onMouseMove = (e: React.MouseEvent<HTMLImageElement>) => {
-    if (!sessionId || status === "uploading") return;
+    if (!currentExample || status !== "Ready" || !naturalSize || !displaySize) return;
 
     const { imgX, imgY } = getCoords(e);
-
-    // outside the image: cancel preview & timer
     if (imgX < 0 || imgY < 0) {
       setPreviewMask(null);
       if (hoverTimer.current) {
@@ -152,16 +183,24 @@ export default function App() {
       return;
     }
 
-    // inside image: reset timer, clear previous preview
     setPreviewMask(null);
     if (hoverTimer.current) clearTimeout(hoverTimer.current);
-    hoverTimer.current = setTimeout(() => {
-      triggerPreview(imgX, imgY);
-    }, 100);
+    hoverTimer.current = setTimeout(async () => {
+      setStatus("Previewing...");
+      try {
+        const data = await requestPreview([...points, { x: imgX, y: imgY }]);
+        if (data.mask_png_b64) {
+          setPreviewMask(`data:image/png;base64,${data.mask_png_b64}`);
+        }
+      } catch (err) {
+        console.error("Preview request failed:", err);
+      } finally {
+        setStatus("Ready");
+      }
+    }, 500);
   };
 
   const onMouseLeave = () => {
-    // mouse left the image: cancel preview & timer
     setPreviewMask(null);
     if (hoverTimer.current) {
       clearTimeout(hoverTimer.current);
@@ -169,144 +208,146 @@ export default function App() {
     }
   };
 
-  const triggerPreview = async (x: number, y: number) => {
-    if (!sessionId) return;
-    setStatus("preview");
-    try {
-      const res = await fetch("http://localhost:8000/click", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ session_id: sessionId, points: [...points, { x, y }] }),
-      });
-      const data = await res.json();
-      if (data.mask_png_b64) {
-        setPreviewMask(`data:image/png;base64,${data.mask_png_b64}`);
-      }
-    } catch (err) {
-      console.error("Preview request failed:", err);
-    } finally {
-      // only clear preview status if we are still previewing (avoid stepping on processing)
-      setStatus((s) => (s === "preview" ? "" : s));
-    }
-  };
-
-  // ---- Clear ----
   const clearPoints = () => {
+    if (status !== "Ready") return;
     setDots([]);
     setPoints([]);
-    setMasks([]);
+    setMask(null);
     setPreviewMask(null);
-    if (hoverTimer.current) {
-      clearTimeout(hoverTimer.current);
-      hoverTimer.current = null;
-    }
   };
 
-  // ---- Pan (right-click & drag) ----
-  const onContextMenu = (e: React.MouseEvent) => {
-    // prevent the browser menu so right-click can pan
-    e.preventDefault();
-  };
+  // ---------- UI ----------
+  const chunk = (metadata as any)[chunkId.toString()] || [];
+  const example = currentExample;
 
-  const onMouseDownPan = (e: React.MouseEvent<HTMLDivElement>) => {
-    if (e.button !== 2) return; // right mouse button
-    dragInfo.current = { dragging: true, startX: e.clientX, startY: e.clientY, panX: pan.x, panY: pan.y };
-  };
-
-  const onMouseMovePan = (e: React.MouseEvent<HTMLDivElement>) => {
-    if (!dragInfo.current?.dragging) return;
-    const dx = e.clientX - dragInfo.current.startX;
-    const dy = e.clientY - dragInfo.current.startY;
-    setPan({ x: dragInfo.current.panX + dx, y: dragInfo.current.panY + dy });
-  };
-
-  const endPan = () => {
-    if (dragInfo.current) dragInfo.current.dragging = false;
-  };
-
-  useEffect(() => {
-    // cleanup timer on unmount
-    return () => {
-      if (hoverTimer.current) clearTimeout(hoverTimer.current);
-    };
-  }, []);
-
-  // ---- UI ----
   return (
-    <div style={{ fontFamily: "sans-serif", textAlign: "center", padding: 20 }}>
-      {/* Header */}
-      <h1 style={{ marginBottom: 8 }}>SAM2</h1>
-
-      {/* Single status row */}
-      <div style={{ minHeight: 22, marginBottom: 10, color: status ? "#d97706" : "#6b7280", fontWeight: 600 }}>
-        {status === "uploading" && "Uploading..."}
-        {status === "processing" && "Processing mask..."}
-        {status === "preview" && "Previewing..."}
-        {!status && "Ready"}
-      </div>
-
-      {/* Controls row */}
-      <div style={{ marginBottom: 12, display: "flex", gap: 8, justifyContent: "center", alignItems: "center" }}>
-        <input
-          type="file"
-          accept="image/*"
-          disabled={status === "uploading"}
-          onChange={(e) => onFileChange(e.target.files?.[0])}
-        />
-        <button onClick={clearPoints} disabled={!imageUrl || status === "uploading"}>
-          Clear points
-        </button>
-        <span style={{ fontSize: 12, color: "#6b7280" }}>(Right-click & drag to move image)</span>
-      </div>
-
-      {/* Centered body */}
+    <div style={{ fontFamily: "sans-serif", minHeight: "100vh", display: "grid", gridTemplateRows: "auto 1fr auto" }}>
+      {/* Top bar */}
       <div
-        onContextMenu={onContextMenu}
-        onMouseDown={onMouseDownPan}
-        onMouseMove={onMouseMovePan}
-        onMouseUp={endPan}
-        onMouseLeave={endPan}
-        style={{ display: "flex", justifyContent: "center", userSelect: "none" }}
+        style={{
+          display: "grid",
+          gridTemplateColumns: "1fr 1fr",
+          alignItems: "start",
+          gap: 16,
+          padding: 16,
+          borderBottom: "1px solid #e5e7eb",
+        }}
       >
-        {imageUrl && (
+        <div style={{ textAlign: "left" }}>
+          <div style={{ fontSize: 18, fontWeight: 700, marginBottom: 8 }}>
+            {example ? example.image_name : "No image"}
+          </div>
+
+          <div style={{ display: "flex", flexWrap: "wrap", alignItems: "center", gap: 8, marginBottom: 8 }}>
+            <label>
+              Chunk:&nbsp;
+              <select
+                value={chunkId}
+                onChange={(e) => {
+                  if (status !== "Ready") return;
+                  setChunkId(parseInt(e.target.value));
+                  setExampleIdx(0);
+                }}
+                disabled={status !== "Ready"}
+              >
+                {Object.keys(metadata).map((cid) => (
+                  <option key={cid} value={parseInt(cid)}>
+                    {cid}
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            <button disabled={exampleIdx === 0 || status !== "Ready"} onClick={() => setExampleIdx((i) => i - 1)}>
+              ⬅ Previous
+            </button>
+            <button
+              disabled={!chunk.length || exampleIdx >= chunk.length - 1 || status !== "Ready"}
+              onClick={() => setExampleIdx((i) => i + 1)}
+            >
+              Next ➡
+            </button>
+
+            <button onClick={clearPoints} disabled={!example || status !== "Ready"}>
+              Clear points
+            </button>
+
+            <span style={{ color: "#6b7280" }}>{chunk.length ? `${exampleIdx + 1}/${chunk.length}` : ""}</span>
+          </div>
+
+          <div style={{ fontWeight: 700, color: "#d97706" }}>{status}</div>
+        </div>
+
+        <div style={{ textAlign: "right" }}>
+          {example?.objects && (
+            <div style={{ display: "inline-block", textAlign: "left" }}>
+              <strong>Objects</strong>
+              <ul style={{ marginTop: 6, marginBottom: 0 }}>
+                {example.objects.map((obj, i) => (
+                  <li key={i}>{obj}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Bottom: image viewer */}
+      <div style={{ display: "flex", justifyContent: "center", alignItems: "flex-start", padding: 16 }}>
+        {example && (
           <div
             style={{
               position: "relative",
               display: "inline-block",
-              transform: `translate3d(${pan.x}px, ${pan.y}px, 0)`,
-              cursor: dragInfo.current?.dragging ? "grabbing" : "default",
+              width: displaySize ? `${displaySize.w}px` : "auto",
+              height: displaySize ? `${displaySize.h}px` : "auto",
             }}
           >
             <img
+              key={imageKey}
               ref={imgRef}
-              src={imageUrl}
-              alt="uploaded"
-              style={{ maxWidth: "100%", border: "1px solid #ccc" }}
+              src={`/images/${encodeURIComponent(example.image_name)}`}
+              alt={example.image_name}
+              style={{
+                width: displaySize ? "100%" : undefined,
+                height: displaySize ? "100%" : undefined,
+                objectFit: "contain",
+                border: "1px solid #ccc",
+                borderRadius: 0,
+                display: "block",
+              }}
+              onLoad={(e) => {
+                const t = e.currentTarget;
+                const nw = t.naturalWidth;
+                const nh = t.naturalHeight;
+                setNaturalSize({ w: nw, h: nh });
+                const { w, h, s } = computeDisplayFromNatural(nw, nh);
+                setDisplaySize({ w, h });
+                setScale(s);
+                setStatus("Ready");
+              }}
               onClick={onImageClick}
               onMouseMove={onMouseMove}
               onMouseLeave={onMouseLeave}
             />
 
-            {/* committed mask */}
-            {masks.length > 0 &&
-              masks.map((m, i) => (
-                <img
-                  key={`mask-${i}`}
-                  src={m}
-                  alt={`mask-${i}`}
-                  style={{
-                    position: "absolute",
-                    top: 0,
-                    left: 0,
-                    width: "100%",
-                    height: "auto",
-                    pointerEvents: "none",
-                  }}
-                />
-              ))}
+            {status === "Ready" && mask && displaySize && (
+              <img
+                src={mask}
+                alt="mask"
+                style={{
+                  position: "absolute",
+                  top: 0,
+                  left: 0,
+                  width: "100%",
+                  height: "100%",
+                  objectFit: "contain",
+                  pointerEvents: "none",
+                }}
+              />
+            )}
 
-            {/* hover preview mask */}
-            {previewMask && (
+            {status === "Ready" && previewMask && displaySize && (
               <img
                 src={previewMask}
                 alt="preview-mask"
@@ -315,32 +356,55 @@ export default function App() {
                   top: 0,
                   left: 0,
                   width: "100%",
-                  height: "auto",
+                  height: "100%",
+                  objectFit: "contain",
                   pointerEvents: "none",
                 }}
               />
             )}
 
-            {/* red dots */}
-            {dots.map((p, i) => (
-              <div
-                key={`dot-${i}`}
-                style={{
-                  position: "absolute",
-                  left: p.x - 4,
-                  top: p.y - 4,
-                  width: 8,
-                  height: 8,
-                  borderRadius: "50%",
-                  background: "red",
-                  border: "1px solid white",
-                  pointerEvents: "none",
-                }}
-              />
-            ))}
+            {status === "Ready" &&
+              dots.map((p, i) => (
+                <div
+                  key={`dot-${i}`}
+                  style={{
+                    position: "absolute",
+                    left: p.x - 4,
+                    top: p.y - 4,
+                    width: 8,
+                    height: 8,
+                    borderRadius: "50%",
+                    background: "red",
+                    border: "1px solid white",
+                    pointerEvents: "none",
+                  }}
+                />
+              ))}
           </div>
         )}
       </div>
+
+      <div />
+
+      {(status === "Uploading..." || status === "Processing...") && (
+        <div
+          style={{
+            position: "fixed",
+            inset: 0,
+            background: "rgba(255,255,255,0.6)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            zIndex: 9999,
+            fontSize: 22,
+            fontWeight: 800,
+            color: "#1f2937",
+            cursor: "wait",
+          }}
+        >
+          {status}
+        </div>
+      )}
     </div>
   );
 }
