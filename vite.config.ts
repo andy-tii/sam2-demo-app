@@ -5,7 +5,7 @@ export default defineConfig({
   plugins: [react()],
   server: {
     host: true, // 0.0.0.0 so ngrok can reach it
-    allowedHosts: ["e2227d75fdc1.ngrok-free.app"],
+    allowedHosts: ["e2227d75fdc1.ngrok-free.app"," 6bc63facb388.ngrok-free.app"],
 
     proxy: {
     "/click":   { target: "http://localhost:8000", changeOrigin: true },
