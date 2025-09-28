@@ -17,7 +17,7 @@ from datetime import datetime
 # Config
 # -------------------------
 # Fixed mask root path
-MASK_DIR = "/input/benchmark_from_sam2/masks"
+MASK_DIR = "./input/benchmark_from_sam2/masks"
 IMAGES_DIR = os.path.join(os.path.dirname(__file__), "..", "public", "images")
 LOGS_DIR = os.path.join(os.path.dirname(__file__), "..", "logs")
 

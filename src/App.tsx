@@ -26,8 +26,7 @@ type Status = "Ready" | "Loading image..." | "Processing..." | "Previewing...";
 const MAX_DISPLAY_W = 1200;
 const MAX_DISPLAY_H = 700;
 
-// Configurable timers
-const HOVER_DELAY_MS = 500;
+const HOVER_DELAY_MS = 100;
 const PREVIEW_MIN_MOVE = 5;
 const CLICK_MASK_DISPLAY_MS = 400;
 
@@ -43,6 +42,7 @@ export default function App() {
   const [masks, setMasks] = useState<string[]>([]);
   const [tempMask, setTempMask] = useState<string | null>(null);
   const [previewMask, setPreviewMask] = useState<string | null>(null);
+  const [showAllMasks, setShowAllMasks] = useState<boolean>(false);
 
   // sizing
   const [naturalSize, setNaturalSize] = useState<{ w: number; h: number } | null>(null);
@@ -76,13 +76,10 @@ export default function App() {
     const proc = map || processed;
     const list: Example[] = (metadata as any)[chunkId.toString()] || [];
     if (!list.length) return 0;
-
     for (let i = 0; i < list.length; i++) {
-      if (!(i in proc)) {
-        return i;
-      }
+      if (!(i in proc)) return i;
     }
-    return 0; // fallback
+    return 0;
   };
 
   const goToExample = () => {
@@ -111,6 +108,7 @@ export default function App() {
     setMasks([]);
     setTempMask(null);
     setPreviewMask(null);
+    setShowAllMasks(false);
     setNaturalSize(null);
     setDisplaySize(null);
     setScale(1);
@@ -131,7 +129,6 @@ export default function App() {
     const rect = img.getBoundingClientRect();
     const dispX = e.clientX - rect.left;
     const dispY = e.clientY - rect.top;
-
     if (dispX < 0 || dispY < 0 || dispX > rect.width || dispY > rect.height) {
       return { imgX: -1, imgY: -1 };
     }
@@ -192,7 +189,6 @@ export default function App() {
   // click → flash mask + save to memory
   const onImageClick = async (e: React.MouseEvent<HTMLImageElement>) => {
     if (!currentExample || status === "Processing..." || !naturalSize || !displaySize) return;
-
     const { imgX, imgY } = getCoords(e);
     if (imgX < 0 || imgY < 0) return;
 
@@ -213,7 +209,6 @@ export default function App() {
   // hover → preview only
   const onMouseMove = (e: React.MouseEvent<HTMLImageElement>) => {
     if (!currentExample || status === "Processing..." || !naturalSize || !displaySize) return;
-
     const { imgX, imgY } = getCoords(e);
     if (imgX < 0 || imgY < 0) {
       setPreviewMask(null);
@@ -221,22 +216,17 @@ export default function App() {
       lastHoverPt.current = null;
       return;
     }
-
     if (
       lastHoverPt.current &&
       Math.hypot(imgX - lastHoverPt.current.x, imgY - lastHoverPt.current.y) < PREVIEW_MIN_MOVE
-    ) {
-      return;
-    }
-    lastHoverPt.current = { x: imgX, y: imgY };
+    ) return;
 
+    lastHoverPt.current = { x: imgX, y: imgY };
     if (hoverTimer.current) clearTimeout(hoverTimer.current);
     hoverTimer.current = setTimeout(async () => {
       try {
         const data = await requestPreview({ x: imgX, y: imgY });
-        if (data.mask_png_b64) {
-          setPreviewMask(`data:image/png;base64,${data.mask_png_b64}`);
-        }
+        if (data.mask_png_b64) setPreviewMask(`data:image/png;base64,${data.mask_png_b64}`);
       } finally {
         if (status !== "Processing...") setStatus("Ready");
       }
@@ -258,6 +248,7 @@ export default function App() {
       {/* Top toolbar */}
       <div className="border-bottom bg-light py-2">
         <div className="container d-flex justify-content-between align-items-center">
+          {/* navigation */}
           <div className="d-flex flex-wrap align-items-center gap-2">
             <div className="d-flex align-items-center me-2">
               <span className="me-2">Chunk</span>
@@ -312,25 +303,19 @@ export default function App() {
                 onKeyDown={(e) => e.key === "Enter" && goToExample()}
                 disabled={!maxExamples || status === "Processing..."}
               />
-              <button
-                className="btn btn-success"
-                onClick={goToExample}
-                disabled={!maxExamples || status === "Processing..."}
-              >
+              <button className="btn btn-success" onClick={goToExample} disabled={!maxExamples || status === "Processing..."}>
                 Go
               </button>
             </div>
           </div>
 
           <div className="border rounded px-3 py-2 bg-white text-end">
-            <div>
-              Progress: <strong>Query {chunk.length ? `${exampleIdx + 1}/${chunk.length}` : ""}</strong>
-            </div>
+            <div>Progress: <strong>Query {chunk.length ? `${exampleIdx + 1}/${chunk.length}` : ""}</strong></div>
           </div>
         </div>
       </div>
 
-      {/* Finish / Skip row ABOVE image */}
+      {/* Finish/Skip row ABOVE image */}
       {example && (
         <div className="container my-3">
           <div className="border rounded p-3 d-flex justify-content-between align-items-center">
@@ -346,9 +331,7 @@ export default function App() {
                   if (!currentExample || masks.length === 0) return;
                   setStatus("Processing...");
                   try {
-                    for (const m of masks) {
-                      await requestSave(m, currentExample.image_name, currentExample.query_id);
-                    }
+                    for (const m of masks) await requestSave(m, currentExample.image_name, currentExample.query_id);
                     await logAction("done");
                     setMasks([]);
                     const nextIdx = jumpToNextUnprocessed();
@@ -380,22 +363,24 @@ export default function App() {
               >
                 Skip ↷
               </button>
+
+              <button
+                className="btn btn-info"
+                onClick={() => setShowAllMasks((v) => !v)}
+                disabled={masks.length === 0}
+              >
+                {showAllMasks ? "Hide Selected" : "View Selected"}
+              </button>
             </div>
           </div>
         </div>
       )}
 
-      {/* Image body */}
+      {/* Image */}
       <div className="container flex-grow-1 mb-3">
         <div className="d-flex justify-content-center">
           {example && (
-            <div
-              style={{
-                position: "relative",
-                width: displaySize ? `${displaySize.w}px` : "auto",
-                height: displaySize ? `${displaySize.h}px` : "auto",
-              }}
-            >
+            <div style={{ position: "relative", width: displaySize ? `${displaySize.w}px` : "auto", height: displaySize ? `${displaySize.h}px` : "auto" }}>
               <img
                 key={imageKey}
                 ref={imgRef}
@@ -424,39 +409,28 @@ export default function App() {
                 onMouseLeave={onMouseLeave}
               />
 
+              {/* temporary flash mask */}
               {tempMask && displaySize && (
-                <img
-                  src={tempMask}
-                  alt="mask"
-                  className="position-absolute top-0 start-0 w-100 h-100"
-                  style={{ objectFit: "contain", pointerEvents: "none" }}
-                />
+                <img src={tempMask} alt="mask" className="position-absolute top-0 start-0 w-100 h-100" style={{ objectFit: "contain", pointerEvents: "none" }} />
               )}
 
+              {/* preview mask */}
               {previewMask && displaySize && (
-                <img
-                  src={previewMask}
-                  alt="preview-mask"
-                  className="position-absolute top-0 start-0 w-100 h-100"
-                  style={{
-                    objectFit: "contain",
-                    pointerEvents: "none",
-                    opacity: 0.7,
-                    border: "2px dashed blue",
-                  }}
-                />
+                <img src={previewMask} alt="preview-mask" className="position-absolute top-0 start-0 w-100 h-100" style={{ objectFit: "contain", pointerEvents: "none", opacity: 0.7, border: "2px dashed blue" }} />
               )}
+
+              {/* all saved masks overlay */}
+              {showAllMasks && masks.map((m, i) => (
+                <img key={i} src={m} alt={`mask-${i}`} className="position-absolute top-0 start-0 w-100 h-100" style={{ objectFit: "contain", pointerEvents: "none", opacity: 0.5 }} />
+              ))}
             </div>
           )}
         </div>
       </div>
 
-      {/* Status overlay — only for Loading & Processing */}
+      {/* Overlay only for Loading & Processing */}
       {(status === "Loading image..." || status === "Processing...") && (
-        <div
-          className="position-fixed top-0 start-0 w-100 h-100 d-flex justify-content-center align-items-center bg-white bg-opacity-50"
-          style={{ zIndex: 9999, fontSize: 22, fontWeight: 800, color: "#1f2937", cursor: "wait" }}
-        >
+        <div className="position-fixed top-0 start-0 w-100 h-100 d-flex justify-content-center align-items-center bg-white bg-opacity-50" style={{ zIndex: 9999, fontSize: 22, fontWeight: 800, color: "#1f2937", cursor: "wait" }}>
           {status}
         </div>
       )}
