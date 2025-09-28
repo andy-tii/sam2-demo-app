@@ -60,11 +60,6 @@ class SaveRequest(BaseModel):
     query_id: int
     mask_png_b64: str
 
-class DeleteRequest(BaseModel):
-    image_name: str
-    query_id: int
-    mask_name: str
-
 class LogRequest(BaseModel):
     chunk_id: int
     index: int
@@ -120,31 +115,6 @@ def call_torchserve(image_name: str, points: List[Dict]) -> Optional[str]:
         print("TorchServe failed:", e)
         return None
 
-# ---- Per-mask thumbnail helper (RED overlay) ----
-def make_single_mask_thumbnail(image_name: str, mask_np: np.ndarray, thumb_w: int = 320) -> str:
-    """
-    Make a thumbnail that overlays ONE mask on the base image (red overlay).
-    """
-    img_path = os.path.join(IMAGES_DIR, image_name)
-    base_img = Image.open(img_path).convert("RGBA")
-
-    h, w = mask_np.shape[:2]
-    if base_img.size != (w, h):
-        base_img = base_img.resize((w, h), Image.BILINEAR)
-
-    alpha = Image.fromarray((mask_np > 0).astype(np.uint8) * 100, mode="L")  # ~39% opacity
-    color_img = Image.new("RGBA", (w, h), (255, 0, 0, 0))  # red overlay
-    color_img.putalpha(alpha)
-    composed = Image.alpha_composite(base_img, color_img)
-
-    if composed.width > thumb_w:
-        ratio = thumb_w / composed.width
-        composed = composed.resize((thumb_w, int(composed.height * ratio)), Image.BILINEAR)
-
-    buf = io.BytesIO()
-    composed.save(buf, format="PNG")
-    return base64.b64encode(buf.getvalue()).decode("utf-8")
-
 # ---- Combined thumbnail (each mask different color) ----
 def distinct_colors(n: int):
     if n <= 0:
@@ -155,7 +125,7 @@ def distinct_colors(n: int):
         for h in hues
     ]
 
-def make_combined_thumbnail(image_name: str, mask_paths: List[str], thumb_w: int = 320) -> str:
+def make_combined_thumbnail(image_name: str, mask_paths: List[str], thumb_w: int = 240) -> str:
     img_path = os.path.join(IMAGES_DIR, image_name)
     base_img = Image.open(img_path).convert("RGBA")
 
@@ -177,7 +147,7 @@ def make_combined_thumbnail(image_name: str, mask_paths: List[str], thumb_w: int
     overlay = Image.new("RGBA", (w, h), (0, 0, 0, 0))
 
     for mask_np, color in zip(masks, colors):
-        alpha = Image.fromarray((mask_np > 0).astype(np.uint8) * 110, mode="L")  # slightly stronger
+        alpha = Image.fromarray((mask_np > 0).astype(np.uint8) * 110, mode="L")
         color_img = Image.new("RGBA", (w, h), color + (0,))
         color_img.putalpha(alpha)
         overlay = Image.alpha_composite(overlay, color_img)
@@ -203,10 +173,6 @@ def append_log(entry: dict):
         f.write(json.dumps(entry) + "\n")
 
 def load_processed(chunk_id: int) -> Dict[int, str]:
-    """
-    Return {index: action} for actions in {'done','skip'}.
-    Later entries overwrite earlier ones.
-    """
     path = _log_path(chunk_id)
     results: Dict[int, str] = {}
     if not os.path.exists(path):
@@ -258,45 +224,13 @@ def save(req: SaveRequest):
 @app.get("/masks")
 def list_masks(image_name: str = Query(...), query_id: int = Query(...)):
     """
-    Return:
-      {
-        "combined_thumb_png_b64": "...",   # all masks layered, different colors
-        "masks": [{ name, thumb_png_b64 }, ...]  # individual thumbnails (red)
-      }
+    Return only the combined thumbnail.
     """
     mdir = mask_dir_for(image_name, query_id)
     names = load_meta(mdir)
-
-    items = []
-    mask_paths = []
-    for n in names:
-        mask_path = os.path.join(mdir, n)
-        if not os.path.exists(mask_path):
-            continue
-        mask_paths.append(mask_path)
-        try:
-            mask_np = np.load(mask_path)
-        except Exception:
-            continue
-        thumb_b64 = make_single_mask_thumbnail(image_name, mask_np)
-        items.append({"name": n, "thumb_png_b64": thumb_b64})
-
+    mask_paths = [os.path.join(mdir, n) for n in names if os.path.exists(os.path.join(mdir, n))]
     combined_b64 = make_combined_thumbnail(image_name, mask_paths) if mask_paths else ""
-
-    return {"combined_thumb_png_b64": combined_b64, "masks": items}
-
-@app.delete("/delete")
-def delete(req: DeleteRequest):
-    try:
-        mdir = mask_dir_for(req.image_name, req.query_id)
-        fpath = os.path.join(mdir, req.mask_name)
-        if os.path.exists(fpath):
-            os.remove(fpath)
-        names = [n for n in load_meta(mdir) if n != req.mask_name]
-        save_meta(mdir, names)
-        return {"status": "deleted"}
-    except Exception as e:
-        return {"error": str(e)}
+    return {"combined_thumb_png_b64": combined_b64}
 
 # ---- Logging endpoints ----
 @app.post("/log")
