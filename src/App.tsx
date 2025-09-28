@@ -27,7 +27,7 @@ const MAX_DISPLAY_W = 1200;
 const MAX_DISPLAY_H = 900;
 
 // Configurable timers
-const HOVER_DELAY_MS = 50;
+const HOVER_DELAY_MS = 200;
 const CLICK_MASK_DISPLAY_MS = 200;
 
 // Create axios instance with timeout
