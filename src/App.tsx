@@ -26,9 +26,9 @@ type Status = "Ready" | "Loading image..." | "Processing..." | "Previewing...";
 const MAX_DISPLAY_W = 1200;
 const MAX_DISPLAY_H = 700;
 
-const HOVER_DELAY_MS = 100;
-const PREVIEW_MIN_MOVE = 2;
-const CLICK_MASK_DISPLAY_MS = 400;
+// Configurable timers
+const HOVER_DELAY_MS = 300; // hover wait
+const CLICK_MASK_DISPLAY_MS = 100; // mask flash
 
 export default function App() {
   const imgRef = useRef<HTMLImageElement | null>(null);
@@ -39,10 +39,9 @@ export default function App() {
   const [currentExample, setCurrentExample] = useState<Example | null>(null);
 
   // masks
-  const [masks, setMasks] = useState<string[]>([]);
-  const [tempMask, setTempMask] = useState<string | null>(null);
-  const [previewMask, setPreviewMask] = useState<string | null>(null);
-  const [showAllMasks, setShowAllMasks] = useState<boolean>(false);
+  const [masks, setMasks] = useState<string[]>([]); // memory
+  const [tempMask, setTempMask] = useState<string | null>(null); // flash mask
+  const [previewMask, setPreviewMask] = useState<string | null>(null); // hover mask
 
   // sizing
   const [naturalSize, setNaturalSize] = useState<{ w: number; h: number } | null>(null);
@@ -55,7 +54,6 @@ export default function App() {
   const [jumpValue, setJumpValue] = useState<string>("");
 
   const hoverTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const lastHoverPt = useRef<{ x: number; y: number } | null>(null);
 
   // --- helpers ---
   const fetchProcessed = async (cid: number) => {
@@ -65,21 +63,26 @@ export default function App() {
       const map: Record<number, "done" | "skip"> = {};
       for (const k of Object.keys(obj)) map[parseInt(k, 10)] = obj[k];
       setProcessed(map);
-      return map;
     } catch {
       setProcessed({});
-      return {};
     }
   };
 
-  const jumpToNextUnprocessed = (map?: Record<number, "done" | "skip">) => {
-    const proc = map || processed;
+  const jumpToNextUnprocessed = () => {
     const list: Example[] = (metadata as any)[chunkId.toString()] || [];
-    if (!list.length) return 0;
-    for (let i = 0; i < list.length; i++) {
-      if (!(i in proc)) return i;
+    if (!list.length) return;
+    for (let i = exampleIdx + 1; i < list.length; i++) {
+      if (!(i in processed)) {
+        setExampleIdx(i);
+        return;
+      }
     }
-    return 0;
+    for (let i = 0; i < list.length; i++) {
+      if (!(i in processed)) {
+        setExampleIdx(i);
+        return;
+      }
+    }
   };
 
   const goToExample = () => {
@@ -93,11 +96,7 @@ export default function App() {
 
   // effects
   useEffect(() => {
-    (async () => {
-      const map = await fetchProcessed(chunkId);
-      const nextIdx = jumpToNextUnprocessed(map);
-      setExampleIdx(nextIdx);
-    })();
+    fetchProcessed(chunkId);
   }, [chunkId]);
 
   useEffect(() => {
@@ -108,56 +107,12 @@ export default function App() {
     setMasks([]);
     setTempMask(null);
     setPreviewMask(null);
-    setShowAllMasks(false);
     setNaturalSize(null);
     setDisplaySize(null);
     setScale(1);
     setStatus("Loading image...");
     setImageKey((k) => k + 1);
-  }, [exampleIdx, chunkId]);
-
-  // keyboard shortcuts
-  useEffect(() => {
-    const handleKey = async (e: KeyboardEvent) => {
-      if (status !== "Ready" || !currentExample) return;
-
-      if (e.key === "Enter" || e.key === " ") {
-        // Finish
-        e.preventDefault();
-        if (masks.length > 0) {
-          setStatus("Processing...");
-          try {
-            for (const m of masks) await requestSave(m, currentExample.image_name, currentExample.query_id);
-            await logAction("done");
-            setMasks([]);
-            const nextIdx = jumpToNextUnprocessed();
-            setExampleIdx(nextIdx);
-          } finally {
-            setStatus("Ready");
-          }
-        }
-      } else if (e.key === "ArrowLeft") {
-        setExampleIdx((i) => Math.max(0, i - 1));
-      } else if (e.key === "ArrowRight") {
-        setExampleIdx((i) => Math.min((metadata as any)[chunkId.toString()]?.length - 1 || 0, i + 1));
-      } else if (e.key.toLowerCase() === "c") {
-        setMasks([]);
-      } else if (e.ctrlKey || e.metaKey) {
-        // Skip
-        setStatus("Processing...");
-        try {
-          await logAction("skip");
-          setMasks([]);
-          const nextIdx = jumpToNextUnprocessed();
-          setExampleIdx(nextIdx);
-        } finally {
-          setStatus("Ready");
-        }
-      }
-    };
-    window.addEventListener("keydown", handleKey);
-    return () => window.removeEventListener("keydown", handleKey);
-  }, [status, masks, currentExample, chunkId, exampleIdx]);
+  }, [exampleIdx]);
 
   // helpers
   const computeDisplayFromNatural = (nw: number, nh: number) => {
@@ -168,10 +123,15 @@ export default function App() {
   const getCoords = (e: React.MouseEvent<HTMLImageElement>) => {
     const img = imgRef.current;
     if (!img || !naturalSize || !displaySize) return { imgX: -1, imgY: -1 };
+
     const rect = img.getBoundingClientRect();
     const dispX = e.clientX - rect.left;
     const dispY = e.clientY - rect.top;
-    if (dispX < 0 || dispY < 0 || dispX > rect.width || dispY > rect.height) return { imgX: -1, imgY: -1 };
+
+    if (dispX < 0 || dispY < 0 || dispX > rect.width || dispY > rect.height) {
+      return { imgX: -1, imgY: -1 };
+    }
+
     const imgX = Math.round(dispX / scale);
     const imgY = Math.round(dispY / scale);
     return { imgX, imgY };
@@ -225,9 +185,10 @@ export default function App() {
     setProcessed((prev) => ({ ...prev, [exampleIdx]: action }));
   }
 
-  // click
+  // click → flash mask + save to memory
   const onImageClick = async (e: React.MouseEvent<HTMLImageElement>) => {
     if (!currentExample || status === "Processing..." || !naturalSize || !displaySize) return;
+
     const { imgX, imgY } = getCoords(e);
     if (imgX < 0 || imgY < 0) return;
 
@@ -236,8 +197,8 @@ export default function App() {
       const data = await requestCommit({ x: imgX, y: imgY });
       if (data.mask_png_b64) {
         const maskData = `data:image/png;base64,${data.mask_png_b64}`;
-        setMasks((prev) => [...prev, maskData]);
-        setTempMask(maskData);
+        setMasks((prev) => [...prev, maskData]); // store in memory
+        setTempMask(maskData); // show flash
         setTimeout(() => setTempMask(null), CLICK_MASK_DISPLAY_MS);
       }
     } finally {
@@ -245,31 +206,35 @@ export default function App() {
     }
   };
 
-  // hover
+  // hover → preview only (not stored)
   const onMouseMove = (e: React.MouseEvent<HTMLImageElement>) => {
     if (!currentExample || status === "Processing..." || !naturalSize || !displaySize) return;
+
     const { imgX, imgY } = getCoords(e);
     if (imgX < 0 || imgY < 0) {
       setPreviewMask(null);
       if (hoverTimer.current) clearTimeout(hoverTimer.current);
-      lastHoverPt.current = null;
       return;
     }
-    if (lastHoverPt.current && Math.hypot(imgX - lastHoverPt.current.x, imgY - lastHoverPt.current.y) < PREVIEW_MIN_MOVE) return;
-    lastHoverPt.current = { x: imgX, y: imgY };
+
     if (hoverTimer.current) clearTimeout(hoverTimer.current);
     hoverTimer.current = setTimeout(async () => {
+      setStatus("Previewing...");
       try {
         const data = await requestPreview({ x: imgX, y: imgY });
-        if (data.mask_png_b64) setPreviewMask(`data:image/png;base64,${data.mask_png_b64}`);
+        if (data.mask_png_b64) {
+          setPreviewMask(`data:image/png;base64,${data.mask_png_b64}`); // preview only
+        }
       } finally {
         if (status !== "Processing...") setStatus("Ready");
       }
     }, HOVER_DELAY_MS);
   };
+
   const onMouseLeave = () => {
     setPreviewMask(null);
     if (hoverTimer.current) clearTimeout(hoverTimer.current);
+    if (status === "Previewing...") setStatus("Ready");
   };
 
   // ---------- UI ----------
@@ -282,7 +247,6 @@ export default function App() {
       {/* Top toolbar */}
       <div className="border-bottom bg-light py-2">
         <div className="container d-flex justify-content-between align-items-center">
-          {/* navigation */}
           <div className="d-flex flex-wrap align-items-center gap-2">
             <div className="d-flex align-items-center me-2">
               <span className="me-2">Chunk</span>
@@ -293,6 +257,7 @@ export default function App() {
                 onChange={(e) => {
                   if (status === "Processing...") return;
                   setChunkId(parseInt(e.target.value, 10));
+                  setExampleIdx(0);
                   setJumpValue("");
                 }}
                 disabled={status === "Processing..."}
@@ -311,98 +276,166 @@ export default function App() {
               </select>
             </div>
 
-            <button className="btn btn-outline-primary" disabled={exampleIdx === 0 || status === "Processing..."} onClick={() => setExampleIdx((i) => i - 1)}>← Previous</button>
-            <button className="btn btn-outline-primary" disabled={!chunk.length || exampleIdx >= chunk.length - 1 || status === "Processing..."} onClick={() => setExampleIdx((i) => i + 1)}>Next →</button>
+            <button
+              className="btn btn-outline-primary"
+              disabled={exampleIdx === 0 || status === "Processing..."}
+              onClick={() => setExampleIdx((i) => i - 1)}
+            >
+              ← Previous
+            </button>
+
+            <button
+              className="btn btn-outline-primary"
+              disabled={!chunk.length || exampleIdx >= chunk.length - 1 || status === "Processing..."}
+              onClick={() => setExampleIdx((i) => i + 1)}
+            >
+              Next →
+            </button>
 
             <div className="input-group ms-2" style={{ width: 160 }}>
               <span className="input-group-text">Jump</span>
-              <input type="number" className="form-control" value={jumpValue} onChange={(e) => setJumpValue(e.target.value)} onKeyDown={(e) => e.key === "Enter" && goToExample()} disabled={!maxExamples || status === "Processing..."} />
-              <button className="btn btn-success" onClick={goToExample} disabled={!maxExamples || status === "Processing..."}>Go</button>
+              <input
+                type="number"
+                className="form-control"
+                value={jumpValue}
+                onChange={(e) => setJumpValue(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && goToExample()}
+                disabled={!maxExamples || status === "Processing..."}
+              />
+              <button className="btn btn-success" onClick={goToExample} disabled={!maxExamples || status === "Processing..."}>
+                Go
+              </button>
             </div>
           </div>
 
           <div className="border rounded px-3 py-2 bg-white text-end">
-            <div>Progress: <strong>Query {chunk.length ? `${exampleIdx + 1}/${chunk.length}` : ""}</strong></div>
+            <div>
+              Progress: <strong>Query {chunk.length ? `${exampleIdx + 1}/${chunk.length}` : ""}</strong>
+            </div>
           </div>
         </div>
       </div>
 
-      {/* Finish/Skip row ABOVE image */}
-      {example && (
-        <div className="container my-3">
-          <div className="border rounded p-3">
-            <div className="d-flex justify-content-between align-items-center mb-2">
-              <div>
-                <div><strong>Query:</strong> {example.query}</div>
-                <div><strong>Label:</strong> {CHUNK_LABELS[String(chunkId)]}</div>
-                <div><strong>Masks selected:</strong> {masks.length}</div>
-              </div>
-              <div className="d-flex gap-2">
-                <button className="btn btn-success" onClick={async () => {
-                  if (!currentExample || masks.length === 0) return;
-                  setStatus("Processing...");
-                  try {
-                    for (const m of masks) await requestSave(m, currentExample.image_name, currentExample.query_id);
-                    await logAction("done");
-                    setMasks([]);
-                    const nextIdx = jumpToNextUnprocessed();
-                    setExampleIdx(nextIdx);
-                  } finally {
-                    setStatus("Ready");
-                  }
-                }} disabled={!example || masks.length === 0 || status !== "Ready"}>Finish ✓</button>
-                <button className="btn btn-secondary" onClick={async () => {
-                  if (!currentExample) return;
-                  setStatus("Processing...");
-                  try {
-                    await logAction("skip");
-                    setMasks([]);
-                    const nextIdx = jumpToNextUnprocessed();
-                    setExampleIdx(nextIdx);
-                  } finally {
-                    setStatus("Ready");
-                  }
-                }} disabled={!example || status !== "Ready"}>Skip ↷</button>
-                <button className="btn btn-info" onClick={() => setShowAllMasks((v) => !v)} disabled={masks.length === 0}>{showAllMasks ? "Hide Selected" : "View Selected"}</button>
-              </div>
-            </div>
-            {/* Instructions */}
-            <div className="text-muted small">
-              Shortcuts: <kbd>Enter</kbd>/<kbd>Space</kbd> = Finish, <kbd>←</kbd>/<kbd>→</kbd> = Prev/Next, <kbd>C</kbd> = Clear masks, <kbd>Ctrl</kbd> = Skip
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* Image */}
+      {/* Body */}
       <div className="container flex-grow-1 mb-3">
-        <div className="d-flex justify-content-center">
-          {example && (
-            <div style={{ position: "relative", width: displaySize ? `${displaySize.w}px` : "auto", height: displaySize ? `${displaySize.h}px` : "auto" }}>
-              <img key={imageKey} ref={imgRef} src={`/images/${example.image_name}`} alt={example.image_name} className="img-fluid border"
-                style={{ width: displaySize ? "100%" : undefined, height: displaySize ? "100%" : undefined, objectFit: "contain", opacity: status === "Processing..." ? 0.6 : 1, pointerEvents: status === "Processing..." ? "none" : "auto" }}
-                onLoad={(e) => {
-                  const t = e.currentTarget;
-                  const nw = t.naturalWidth;
-                  const nh = t.naturalHeight;
-                  setNaturalSize({ w: nw, h: nh });
-                  const { w, h, s } = computeDisplayFromNatural(nw, nh);
-                  setDisplaySize({ w, h });
-                  setScale(s);
-                  setStatus("Ready");
+        <div className="row g-3">
+          {/* Image column */}
+          <div className="col-lg-9 d-flex justify-content-center">
+            {example && (
+              <div
+                style={{
+                  position: "relative",
+                  width: displaySize ? `${displaySize.w}px` : "auto",
+                  height: displaySize ? `${displaySize.h}px` : "auto",
                 }}
-                onClick={onImageClick} onMouseMove={onMouseMove} onMouseLeave={onMouseLeave} />
+              >
+                <img
+                  key={imageKey}
+                  ref={imgRef}
+                  src={`/images/${example.image_name}`}
+                  alt={example.image_name}
+                  className="img-fluid border"
+                  style={{
+                    width: displaySize ? "100%" : undefined,
+                    height: displaySize ? "100%" : undefined,
+                    objectFit: "contain",
+                    opacity: status === "Processing..." ? 0.6 : 1,
+                    pointerEvents: status === "Processing..." ? "none" : "auto",
+                  }}
+                  onLoad={(e) => {
+                    const t = e.currentTarget;
+                    const nw = t.naturalWidth;
+                    const nh = t.naturalHeight;
+                    setNaturalSize({ w: nw, h: nh });
+                    const { w, h, s } = computeDisplayFromNatural(nw, nh);
+                    setDisplaySize({ w, h });
+                    setScale(s);
+                    setStatus("Ready");
+                  }}
+                  onClick={onImageClick}
+                  onMouseMove={onMouseMove}
+                  onMouseLeave={onMouseLeave}
+                />
 
-              {tempMask && displaySize && <img src={tempMask} alt="mask" className="position-absolute top-0 start-0 w-100 h-100" style={{ objectFit: "contain", pointerEvents: "none" }} />}
-              {previewMask && displaySize && <img src={previewMask} alt="preview-mask" className="position-absolute top-0 start-0 w-100 h-100" style={{ objectFit: "contain", pointerEvents: "none", opacity: 0.7, border: "2px dashed blue" }} />}
-              {showAllMasks && masks.map((m, i) => <img key={i} src={m} alt={`mask-${i}`} className="position-absolute top-0 start-0 w-100 h-100" style={{ objectFit: "contain", pointerEvents: "none", opacity: 0.5 }} />)}
+                {/* temp mask (click flash) */}
+                {tempMask && displaySize && (
+                  <img
+                    src={tempMask}
+                    alt="mask"
+                    className="position-absolute top-0 start-0 w-100 h-100"
+                    style={{ objectFit: "contain", pointerEvents: "none" }}
+                  />
+                )}
+
+                {/* hover preview (not stored) */}
+                {previewMask && displaySize && (
+                  <img
+                    src={previewMask}
+                    alt="preview-mask"
+                    className="position-absolute top-0 start-0 w-100 h-100"
+                    style={{ objectFit: "contain", pointerEvents: "none", opacity: 0.7 }}
+                  />
+                )}
+              </div>
+            )}
+          </div>
+
+          {/* Sidebar */}
+          <div className="col-lg-3">
+            <div className="border rounded p-3">
+              <strong>Masks selected: {masks.length}</strong>
+              <div className="d-flex flex-column gap-2 mt-3">
+                <button
+                  className="btn btn-success"
+                  onClick={async () => {
+                    if (!currentExample || masks.length === 0) return;
+                    setStatus("Processing...");
+                    try {
+                      for (const m of masks) {
+                        await requestSave(m, currentExample.image_name, currentExample.query_id);
+                      }
+                      await logAction("done");
+                      setMasks([]);
+                      jumpToNextUnprocessed();
+                    } finally {
+                      setStatus("Ready");
+                    }
+                  }}
+                  disabled={!example || masks.length === 0 || status !== "Ready"}
+                >
+                  Finish ✓
+                </button>
+
+                <button
+                  className="btn btn-secondary"
+                  onClick={async () => {
+                    if (!currentExample) return;
+                    setStatus("Processing...");
+                    try {
+                      await logAction("skip");
+                      setMasks([]);
+                      jumpToNextUnprocessed();
+                    } finally {
+                      setStatus("Ready");
+                    }
+                  }}
+                  disabled={!example || status !== "Ready"}
+                >
+                  Skip ↷
+                </button>
+              </div>
             </div>
-          )}
+          </div>
         </div>
       </div>
 
-      {(status === "Loading image..." || status === "Processing...") && (
-        <div className="position-fixed top-0 start-0 w-100 h-100 d-flex justify-content-center align-items-center bg-white bg-opacity-50" style={{ zIndex: 9999, fontSize: 22, fontWeight: 800, color: "#1f2937", cursor: "wait" }}>{status}</div>
+      {/* Status overlay */}
+      {(status === "Loading image..." || status === "Processing..." || status === "Previewing...") && (
+        <div
+          className="position-fixed top-0 start-0 w-100 h-100 d-flex justify-content-center align-items-center bg-white bg-opacity-50"
+          style={{ zIndex: 9999, fontSize: 22, fontWeight: 800, color: "#1f2937", cursor: "wait" }}
+        >
+        </div>
       )}
     </div>
   );
