@@ -24,11 +24,11 @@ const CHUNK_LABELS: Record<string, string> = {
 type Status = "Ready" | "Loading image..." | "Processing..." | "Previewing...";
 
 const MAX_DISPLAY_W = 1200;
-const MAX_DISPLAY_H = 700;
+const MAX_DISPLAY_H = 900;
 
 // Configurable timers
-const HOVER_DELAY_MS = 300; // hover wait
-const CLICK_MASK_DISPLAY_MS = 100; // mask flash
+const HOVER_DELAY_MS = 100; // hover wait
+const CLICK_MASK_DISPLAY_MS = 200; // mask flash
 
 export default function App() {
   const imgRef = useRef<HTMLImageElement | null>(null);
@@ -39,9 +39,10 @@ export default function App() {
   const [currentExample, setCurrentExample] = useState<Example | null>(null);
 
   // masks
-  const [masks, setMasks] = useState<string[]>([]); // memory
-  const [tempMask, setTempMask] = useState<string | null>(null); // flash mask
-  const [previewMask, setPreviewMask] = useState<string | null>(null); // hover mask
+  const [masks, setMasks] = useState<string[]>([]);
+  const [tempMask, setTempMask] = useState<string | null>(null);
+  const [previewMask, setPreviewMask] = useState<string | null>(null);
+  const [showAllMasks, setShowAllMasks] = useState<boolean>(false);
 
   // sizing
   const [naturalSize, setNaturalSize] = useState<{ w: number; h: number } | null>(null);
@@ -101,18 +102,24 @@ export default function App() {
 
   useEffect(() => {
     const list: Example[] = (metadata as any)[chunkId.toString()] || [];
-    const ex = list[exampleIdx] || null;
+    let idx = exampleIdx;
+    if (idx >= list.length) {
+      idx = 0;
+      setExampleIdx(0);
+    }
+    const ex = list[idx] || null;
     setCurrentExample(ex);
 
     setMasks([]);
     setTempMask(null);
     setPreviewMask(null);
+    setShowAllMasks(false);
     setNaturalSize(null);
     setDisplaySize(null);
     setScale(1);
     setStatus("Loading image...");
     setImageKey((k) => k + 1);
-  }, [exampleIdx]);
+  }, [chunkId, exampleIdx]);
 
   // helpers
   const computeDisplayFromNatural = (nw: number, nh: number) => {
@@ -123,15 +130,12 @@ export default function App() {
   const getCoords = (e: React.MouseEvent<HTMLImageElement>) => {
     const img = imgRef.current;
     if (!img || !naturalSize || !displaySize) return { imgX: -1, imgY: -1 };
-
     const rect = img.getBoundingClientRect();
     const dispX = e.clientX - rect.left;
     const dispY = e.clientY - rect.top;
-
     if (dispX < 0 || dispY < 0 || dispX > rect.width || dispY > rect.height) {
       return { imgX: -1, imgY: -1 };
     }
-
     const imgX = Math.round(dispX / scale);
     const imgY = Math.round(dispY / scale);
     return { imgX, imgY };
@@ -185,20 +189,18 @@ export default function App() {
     setProcessed((prev) => ({ ...prev, [exampleIdx]: action }));
   }
 
-  // click → flash mask + save to memory
+  // click
   const onImageClick = async (e: React.MouseEvent<HTMLImageElement>) => {
     if (!currentExample || status === "Processing..." || !naturalSize || !displaySize) return;
-
     const { imgX, imgY } = getCoords(e);
     if (imgX < 0 || imgY < 0) return;
-
     setStatus("Processing...");
     try {
       const data = await requestCommit({ x: imgX, y: imgY });
       if (data.mask_png_b64) {
         const maskData = `data:image/png;base64,${data.mask_png_b64}`;
-        setMasks((prev) => [...prev, maskData]); // store in memory
-        setTempMask(maskData); // show flash
+        setMasks((prev) => [...prev, maskData]);
+        setTempMask(maskData);
         setTimeout(() => setTempMask(null), CLICK_MASK_DISPLAY_MS);
       }
     } finally {
@@ -206,24 +208,22 @@ export default function App() {
     }
   };
 
-  // hover → preview only (not stored)
+  // hover
   const onMouseMove = (e: React.MouseEvent<HTMLImageElement>) => {
     if (!currentExample || status === "Processing..." || !naturalSize || !displaySize) return;
-
     const { imgX, imgY } = getCoords(e);
     if (imgX < 0 || imgY < 0) {
       setPreviewMask(null);
       if (hoverTimer.current) clearTimeout(hoverTimer.current);
       return;
     }
-
     if (hoverTimer.current) clearTimeout(hoverTimer.current);
     hoverTimer.current = setTimeout(async () => {
       setStatus("Previewing...");
       try {
         const data = await requestPreview({ x: imgX, y: imgY });
         if (data.mask_png_b64) {
-          setPreviewMask(`data:image/png;base64,${data.mask_png_b64}`); // preview only
+          setPreviewMask(`data:image/png;base64,${data.mask_png_b64}`);
         }
       } finally {
         if (status !== "Processing...") setStatus("Ready");
@@ -275,7 +275,6 @@ export default function App() {
                   })}
               </select>
             </div>
-
             <button
               className="btn btn-outline-primary"
               disabled={exampleIdx === 0 || status === "Processing..."}
@@ -283,7 +282,6 @@ export default function App() {
             >
               ← Previous
             </button>
-
             <button
               className="btn btn-outline-primary"
               disabled={!chunk.length || exampleIdx >= chunk.length - 1 || status === "Processing..."}
@@ -291,7 +289,6 @@ export default function App() {
             >
               Next →
             </button>
-
             <div className="input-group ms-2" style={{ width: 160 }}>
               <span className="input-group-text">Jump</span>
               <input
@@ -307,7 +304,6 @@ export default function App() {
               </button>
             </div>
           </div>
-
           <div className="border rounded px-3 py-2 bg-white text-end">
             <div>
               Progress: <strong>Query {chunk.length ? `${exampleIdx + 1}/${chunk.length}` : ""}</strong>
@@ -316,11 +312,77 @@ export default function App() {
         </div>
       </div>
 
-      {/* Body */}
+      {/* Controls above image */}
+      {example && (
+        <div className="container my-2">
+          <div className="d-flex flex-wrap justify-content-between align-items-center border rounded p-2 bg-light">
+            <div>
+              <div><strong>Query:</strong> {example.query}</div>
+              <div><strong>Query ID:</strong> {example.query_id}</div>
+              <div><strong>Level:</strong> {CHUNK_LABELS[String(chunkId)] ?? chunkId}</div>
+            </div>
+            <div className="d-flex gap-2 align-items-center">
+              <div><strong>Masks selected:</strong> {masks.length}</div>
+              <button
+                className="btn btn-info"
+                onClick={() => setShowAllMasks((v) => !v)}
+                disabled={!example || masks.length === 0}
+              >
+                {showAllMasks ? "Hide Masks" : "View Masks"}
+              </button>
+              <button
+                className="btn btn-warning"
+                onClick={() => setMasks([])}
+                disabled={!example || masks.length === 0}
+              >
+                Clear All ✕
+              </button>
+              <button
+                className="btn btn-success"
+                onClick={async () => {
+                  if (!currentExample || masks.length === 0) return;
+                  setStatus("Processing...");
+                  try {
+                    for (const m of masks) {
+                      await requestSave(m, currentExample.image_name, currentExample.query_id);
+                    }
+                    await logAction("done");
+                    setMasks([]);
+                    jumpToNextUnprocessed();
+                  } finally {
+                    setStatus("Ready");
+                  }
+                }}
+                disabled={!example || masks.length === 0 || status !== "Ready"}
+              >
+                Finish ✓
+              </button>
+              <button
+                className="btn btn-secondary"
+                onClick={async () => {
+                  if (!currentExample) return;
+                  setStatus("Processing...");
+                  try {
+                    await logAction("skip");
+                    setMasks([]);
+                    jumpToNextUnprocessed();
+                  } finally {
+                    setStatus("Ready");
+                  }
+                }}
+                disabled={!example || status !== "Ready"}
+              >
+                Skip ↷
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Body with image */}
       <div className="container flex-grow-1 mb-3">
         <div className="row g-3">
-          {/* Image column */}
-          <div className="col-lg-9 d-flex justify-content-center">
+          <div className="col-lg-12 d-flex justify-content-center">
             {example && (
               <div
                 style={{
@@ -357,7 +419,7 @@ export default function App() {
                   onMouseLeave={onMouseLeave}
                 />
 
-                {/* temp mask (click flash) */}
+                {/* temp mask flash */}
                 {tempMask && displaySize && (
                   <img
                     src={tempMask}
@@ -367,7 +429,7 @@ export default function App() {
                   />
                 )}
 
-                {/* hover preview (not stored) */}
+                {/* hover preview */}
                 {previewMask && displaySize && (
                   <img
                     src={previewMask}
@@ -376,55 +438,20 @@ export default function App() {
                     style={{ objectFit: "contain", pointerEvents: "none", opacity: 0.7 }}
                   />
                 )}
+
+                {/* show all masks */}
+                {showAllMasks &&
+                  masks.map((m, i) => (
+                    <img
+                      key={`mask-${i}`}
+                      src={m}
+                      alt={`mask-${i}`}
+                      className="position-absolute top-0 start-0 w-100 h-100"
+                      style={{ objectFit: "contain", pointerEvents: "none", opacity: 0.5 }}
+                    />
+                  ))}
               </div>
             )}
-          </div>
-
-          {/* Sidebar */}
-          <div className="col-lg-3">
-            <div className="border rounded p-3">
-              <strong>Masks selected: {masks.length}</strong>
-              <div className="d-flex flex-column gap-2 mt-3">
-                <button
-                  className="btn btn-success"
-                  onClick={async () => {
-                    if (!currentExample || masks.length === 0) return;
-                    setStatus("Processing...");
-                    try {
-                      for (const m of masks) {
-                        await requestSave(m, currentExample.image_name, currentExample.query_id);
-                      }
-                      await logAction("done");
-                      setMasks([]);
-                      jumpToNextUnprocessed();
-                    } finally {
-                      setStatus("Ready");
-                    }
-                  }}
-                  disabled={!example || masks.length === 0 || status !== "Ready"}
-                >
-                  Finish ✓
-                </button>
-
-                <button
-                  className="btn btn-secondary"
-                  onClick={async () => {
-                    if (!currentExample) return;
-                    setStatus("Processing...");
-                    try {
-                      await logAction("skip");
-                      setMasks([]);
-                      jumpToNextUnprocessed();
-                    } finally {
-                      setStatus("Ready");
-                    }
-                  }}
-                  disabled={!example || status !== "Ready"}
-                >
-                  Skip ↷
-                </button>
-              </div>
-            </div>
           </div>
         </div>
       </div>
@@ -435,6 +462,7 @@ export default function App() {
           className="position-fixed top-0 start-0 w-100 h-100 d-flex justify-content-center align-items-center bg-white bg-opacity-50"
           style={{ zIndex: 9999, fontSize: 22, fontWeight: 800, color: "#1f2937", cursor: "wait" }}
         >
+          {status}
         </div>
       )}
     </div>
