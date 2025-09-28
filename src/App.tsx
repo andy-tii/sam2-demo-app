@@ -27,7 +27,7 @@ const MAX_DISPLAY_W = 1200;
 const MAX_DISPLAY_H = 900;
 
 // Configurable timers
-const HOVER_DELAY_MS = 200;
+const HOVER_DELAY_MS = 100;
 const CLICK_MASK_DISPLAY_MS = 200;
 
 // Create axios instance with timeout
@@ -378,6 +378,59 @@ export default function App() {
     }
   }, [chunkId, exampleIdx, chunk]);
 
+  // Keyboard shortcuts
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      // Ignore if user is typing in input fields
+      if (e.target instanceof HTMLInputElement || e.target instanceof HTMLSelectElement) {
+        return;
+      }
+
+      // Ignore if processing
+      if (status === "Processing...") {
+        return;
+      }
+
+      switch (e.key.toLowerCase()) {
+        case ' ':
+        case 'enter':
+          e.preventDefault();
+          if (currentExample && masks.length > 0 && status === "Ready") {
+            handleFinish();
+          }
+          break;
+        
+        case 's':
+          if (e.ctrlKey || e.metaKey) {
+            e.preventDefault();
+            if (currentExample && status === "Ready") {
+              handleSkip();
+            }
+          }
+          break;
+        
+        case 'c':
+          e.preventDefault();
+          if (currentExample && masks.length > 0) {
+            setMasks([]);
+          }
+          break;
+        
+        case 'v':
+          e.preventDefault();
+          if (currentExample && masks.length > 0) {
+            setShowAllMasks(v => !v);
+          }
+          break;
+      }
+    };
+
+    document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [currentExample, masks.length, status, handleFinish, handleSkip]);
+
   // Cleanup on unmount
   useEffect(() => {
     return () => {
@@ -482,6 +535,7 @@ export default function App() {
                 className="btn btn-info"
                 onClick={() => setShowAllMasks(v => !v)}
                 disabled={!currentExample || masks.length === 0}
+                title="Toggle mask view (V)"
               >
                 {showAllMasks ? "Hide Masks" : "View Masks"}
               </button>
@@ -490,6 +544,7 @@ export default function App() {
                 className="btn btn-warning"
                 onClick={() => setMasks([])}
                 disabled={!currentExample || masks.length === 0}
+                title="Clear all masks (C)"
               >
                 Clear All ✕
               </button>
@@ -498,6 +553,7 @@ export default function App() {
                 className="btn btn-success"
                 onClick={handleFinish}
                 disabled={!currentExample || masks.length === 0 || status !== "Ready"}
+                title="Finish and save (Space/Enter)"
               >
                 Finish ✓
               </button>
@@ -506,10 +562,16 @@ export default function App() {
                 className="btn btn-secondary"
                 onClick={handleSkip}
                 disabled={!currentExample || status !== "Ready"}
+                title="Skip this item (Ctrl+S)"
               >
                 Skip ↷
               </button>
             </div>
+          </div>
+          
+          {/* Keyboard shortcuts help */}
+          <div className="mt-2 text-muted small">
+            <strong>Keyboard shortcuts:</strong> Space/Enter: Finish | Ctrl+S: Skip | C: Clear masks | V: Toggle mask view
           </div>
         </div>
       )}
