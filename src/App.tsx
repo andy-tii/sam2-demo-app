@@ -27,7 +27,7 @@ const MAX_DISPLAY_W = 1200;
 const MAX_DISPLAY_H = 900;
 
 // Configurable timers
-const HOVER_DELAY_MS = 100;
+const HOVER_DELAY_MS = 10;
 const CLICK_MASK_DISPLAY_MS = 200;
 
 // Create axios instance with timeout
@@ -205,39 +205,42 @@ export default function App() {
   }, [jumpValue, chunk.length]);
 
   // Debounced mouse move handler
-  const onMouseMove = useCallback((e: React.MouseEvent<HTMLImageElement>) => {
-    if (!currentExample || status === "Processing..." || !naturalSize || !displaySize) return;
-    
-    const { imgX, imgY } = getCoords(e);
-    if (imgX < 0 || imgY < 0) {
-      setPreviewMask(null);
-      if (hoverTimer.current) {
-        clearTimeout(hoverTimer.current);
-        hoverTimer.current = null;
-      }
-      return;
-    }
-
+const onMouseMove = useCallback((e: React.MouseEvent<HTMLImageElement>) => {
+  if (!currentExample || status === "Processing..." || !naturalSize || !displaySize) return;
+  
+  const { imgX, imgY } = getCoords(e);
+  if (imgX < 0 || imgY < 0) {
+    setPreviewMask(null);
     if (hoverTimer.current) {
       clearTimeout(hoverTimer.current);
+      hoverTimer.current = null;
     }
+    return;
+  }
 
-    hoverTimer.current = setTimeout(async () => {
-      setStatus("Previewing...");
-      try {
-        const data = await requestPreview({ x: imgX, y: imgY });
-        if (data.mask_png_b64) {
-          setPreviewMask(`data:image/png;base64,${data.mask_png_b64}`);
-        }
-      } catch (error) {
-        if (!axios.isCancel(error)) {
-          console.error("Preview request failed:", error);
-        }
-      } finally {
-        setStatus(prev => prev !== "Processing..." ? "Ready" : prev);
+  if (hoverTimer.current) {
+    clearTimeout(hoverTimer.current);
+  }
+
+  hoverTimer.current = setTimeout(async () => {
+    console.time("preview-request"); // start timer
+    setStatus("Previewing...");
+    try {
+      console.log("Sending preview request at coords:", imgX, imgY);
+      const data = await requestPreview({ x: imgX, y: imgY });
+      console.timeEnd("preview-request"); // end timer
+      if (data.mask_png_b64) {
+        setPreviewMask(`data:image/png;base64,${data.mask_png_b64}`);
       }
-    }, HOVER_DELAY_MS);
-  }, [currentExample, status, naturalSize, displaySize, getCoords, requestPreview]);
+    } catch (error) {
+      if (!axios.isCancel(error)) {
+        console.error("Preview request failed:", error);
+      }
+    } finally {
+      setStatus(prev => prev !== "Processing..." ? "Ready" : prev);
+    }
+  }, HOVER_DELAY_MS);
+}, [currentExample, status, naturalSize, displaySize, getCoords, requestPreview]);
 
   const onMouseLeave = useCallback(() => {
     setPreviewMask(null);
@@ -661,7 +664,7 @@ export default function App() {
       </div>
 
       {/* Status overlay */}
-      {(status === "Loading image..." || status === "Processing..." || status === "Previewing...") && (
+      {(status === "Loading image..." || status === "Processing..." ) && (
         <div
           className="position-fixed top-0 start-0 w-100 h-100 d-flex justify-content-center align-items-center"
           style={{ 

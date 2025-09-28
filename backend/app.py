@@ -5,18 +5,21 @@ import base64
 import random
 import string
 import numpy as np
-import requests
 from typing import List, Dict, Optional
+from datetime import datetime
+
 from fastapi import FastAPI, Query
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from PIL import Image
-from datetime import datetime
+
+import torch
+from sam2.build_sam import build_sam2
+from sam2.sam2_image_predictor import SAM2ImagePredictor
 
 # -------------------------
 # Config
 # -------------------------
-# Fixed mask root path
 MASK_DIR = "./input/benchmark_from_sam2/masks"
 IMAGES_DIR = os.path.join(os.path.dirname(__file__), "..", "public", "images")
 LOGS_DIR = os.path.join(os.path.dirname(__file__), "..", "logs")
@@ -24,7 +27,8 @@ LOGS_DIR = os.path.join(os.path.dirname(__file__), "..", "logs")
 os.makedirs(MASK_DIR, exist_ok=True)
 os.makedirs(LOGS_DIR, exist_ok=True)
 
-TORCHSERVE_URL = "http://localhost:7779/predict"  # fixed
+CHECKPOINT_PATH = "/home/andy/sam_app/interactive-sam2/sam2/checkpoints/sam2.1_hiera_large.pt"
+CONFIG_NAME = "configs/sam2.1/sam2.1_hiera_l.yaml"
 
 # -------------------------
 # App Setup
@@ -37,6 +41,13 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+# -------------------------
+# SAM2 model init
+# -------------------------
+print("Loading SAM2 model...")
+DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+MODEL = build_sam2(CONFIG_NAME, CHECKPOINT_PATH).to(DEVICE)
 
 # -------------------------
 # Models
@@ -74,9 +85,6 @@ def random_id(n: int = 10) -> str:
     return "".join(random.choices(string.ascii_lowercase + string.digits, k=n))
 
 def mask_dir_for(image_name: str, query_id: int) -> str:
-    """
-    Each image/query gets its own subdir inside MASK_DIR
-    """
     base, _ = os.path.splitext(image_name)
     mdir = os.path.join(MASK_DIR, f"{base}_{query_id}")
     os.makedirs(mdir, exist_ok=True)
@@ -103,19 +111,40 @@ def update_metadata(mdir: str, mask_name: str):
         names.append(mask_name)
     save_meta(mdir, names)
 
-def call_torchserve(image_name: str, points: List[Dict]) -> Optional[str]:
+def run_sam2(image_name: str, points: List[Dict]) -> Optional[str]:
+    """
+    Run SAM2 prediction and return base64-encoded PNG mask
+    (raw grayscale, same as TorchServe was returning).
+    """
     try:
         img_path = os.path.join(IMAGES_DIR, image_name)
-        with open(img_path, "rb") as f:
-            image_bytes = f.read()
-        image_b64 = base64.b64encode(image_bytes).decode("utf-8")
+        img = Image.open(img_path).convert("RGB")
+        arr = np.array(img)
 
-        payload = {"image": image_b64, "points": points}
-        resp = requests.post(TORCHSERVE_URL, json=payload, timeout=60)
-        resp.raise_for_status()
-        return resp.json().get("mask_png_b64")
+        predictor = SAM2ImagePredictor(MODEL)
+        predictor.set_image(arr)
+
+        if not points:
+            return None
+
+        pts = np.array([[p["x"], p["y"]] for p in points], dtype=np.float32)
+        labels = np.array([p.get("label", 1) for p in points], dtype=np.int32)
+
+        masks, scores, _ = predictor.predict(
+            point_coords=pts,
+            point_labels=labels,
+            multimask_output=True,
+        )
+        best_mask = masks[np.argmax(scores)]
+
+        # Convert binary mask to grayscale PNG (0–255)
+        mask_img = Image.fromarray((best_mask * 255).astype(np.uint8), mode="L")
+        buf = io.BytesIO()
+        mask_img.save(buf, format="PNG")
+        return base64.b64encode(buf.getvalue()).decode("utf-8")
+
     except Exception as e:
-        print("TorchServe failed:", e)
+        print("SAM2 inference failed:", e)
         return None
 
 def make_preview_overlay(image_name: str, mask_b64: str) -> Optional[str]:
@@ -154,10 +183,6 @@ def append_log(entry: dict):
         f.write(json.dumps(entry) + "\n")
 
 def load_processed(chunk_id: int) -> Dict[int, str]:
-    """
-    Return {index: action} for actions in {'done','skip'}.
-    Later entries overwrite earlier ones.
-    """
     path = _log_path(chunk_id)
     results: Dict[int, str] = {}
     if not os.path.exists(path):
@@ -183,9 +208,9 @@ def load_processed(chunk_id: int) -> Dict[int, str]:
 def click(req: ClickRequest):
     """
     Generate a mask for a clicked point (single point).
-    Returns raw mask (not red overlay).
+    Returns raw grayscale mask.
     """
-    mask_b64 = call_torchserve(req.image_name, [p.dict() for p in req.points])
+    mask_b64 = run_sam2(req.image_name, [p.dict() for p in req.points])
     return {"mask_png_b64": mask_b64}
 
 @app.post("/preview")
@@ -193,7 +218,7 @@ def preview(req: ClickRequest):
     """
     Generate a red overlay preview for hover.
     """
-    mask_b64 = call_torchserve(req.image_name, [p.dict() for p in req.points])
+    mask_b64 = run_sam2(req.image_name, [p.dict() for p in req.points])
     if not mask_b64:
         return {"mask_png_b64": None}
     overlay_b64 = make_preview_overlay(req.image_name, mask_b64)
@@ -206,20 +231,17 @@ def save(req: SaveRequest):
     """
     try:
         mdir = mask_dir_for(req.image_name, req.query_id)
-        
-        saved_names = []
-        mask_b64=req.mask_png_b64
-        mask_bytes = base64.b64decode(mask_b64)
+
+        mask_bytes = base64.b64decode(req.mask_png_b64)
         mask_img = Image.open(io.BytesIO(mask_bytes)).convert("L")
         mask_np = np.array(mask_img)
+
         mask_name = f"{random_id(10)}.npy"
         out_path = os.path.join(mdir, mask_name)
         np.save(out_path, mask_np)
 
         update_metadata(mdir, mask_name)
-        saved_names.append(mask_name)
-
-        return {"status": "ok", "saved": saved_names}
+        return {"status": "ok", "saved": [mask_name]}
     except Exception as e:
         return {"error": str(e)}
 
