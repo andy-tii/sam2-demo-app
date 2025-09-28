@@ -12,15 +12,15 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from PIL import Image
 from datetime import datetime
-import colorsys
 
 # -------------------------
 # Config
 # -------------------------
-ROOT = os.path.dirname(__file__)
-MASK_DIR = os.path.join(ROOT, "..", "public", "masks")
-IMAGES_DIR = os.path.join(ROOT, "..", "public", "images")
-LOGS_DIR = os.path.join(ROOT, "..", "logs")
+# Fixed mask root path
+MASK_DIR = "./input/benchmark_from_sam2/masks"
+IMAGES_DIR = os.path.join(os.path.dirname(__file__), "..", "public", "images")
+LOGS_DIR = os.path.join(os.path.dirname(__file__), "..", "logs")
+
 os.makedirs(MASK_DIR, exist_ok=True)
 os.makedirs(LOGS_DIR, exist_ok=True)
 
@@ -32,7 +32,7 @@ TORCHSERVE_URL = "http://localhost:7779/predict"  # fixed
 app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],          # dev-friendly; tighten for production
+    allow_origins=["*"],  # dev-friendly; tighten for production
     allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -60,11 +60,6 @@ class SaveRequest(BaseModel):
     query_id: int
     mask_png_b64: str
 
-class DeleteRequest(BaseModel):
-    image_name: str
-    query_id: int
-    mask_name: str
-
 class LogRequest(BaseModel):
     chunk_id: int
     index: int
@@ -79,6 +74,9 @@ def random_id(n: int = 10) -> str:
     return "".join(random.choices(string.ascii_lowercase + string.digits, k=n))
 
 def mask_dir_for(image_name: str, query_id: int) -> str:
+    """
+    Each image/query gets its own subdir inside MASK_DIR
+    """
     base, _ = os.path.splitext(image_name)
     mdir = os.path.join(MASK_DIR, f"{base}_{query_id}")
     os.makedirs(mdir, exist_ok=True)
@@ -110,8 +108,8 @@ def call_torchserve(image_name: str, points: List[Dict]) -> Optional[str]:
         img_path = os.path.join(IMAGES_DIR, image_name)
         with open(img_path, "rb") as f:
             image_bytes = f.read()
-
         image_b64 = base64.b64encode(image_bytes).decode("utf-8")
+
         payload = {"image": image_b64, "points": points}
         resp = requests.post(TORCHSERVE_URL, json=payload, timeout=60)
         resp.raise_for_status()
@@ -120,79 +118,32 @@ def call_torchserve(image_name: str, points: List[Dict]) -> Optional[str]:
         print("TorchServe failed:", e)
         return None
 
-# ---- Per-mask thumbnail helper (RED overlay) ----
-def make_single_mask_thumbnail(image_name: str, mask_np: np.ndarray, thumb_w: int = 320) -> str:
+def make_preview_overlay(image_name: str, mask_b64: str) -> Optional[str]:
     """
-    Make a thumbnail that overlays ONE mask on the base image (red overlay).
+    Overlay mask (red transparent) on the original image for preview only.
     """
-    img_path = os.path.join(IMAGES_DIR, image_name)
-    base_img = Image.open(img_path).convert("RGBA")
+    try:
+        mask_bytes = base64.b64decode(mask_b64)
+        mask_img = Image.open(io.BytesIO(mask_bytes)).convert("L")
+        mask_np = np.array(mask_img)
 
-    h, w = mask_np.shape[:2]
-    if base_img.size != (w, h):
-        base_img = base_img.resize((w, h), Image.BILINEAR)
+        img_path = os.path.join(IMAGES_DIR, image_name)
+        base_img = Image.open(img_path).convert("RGBA")
+        base_img = base_img.resize(mask_img.size, Image.BILINEAR)
 
-    alpha = Image.fromarray((mask_np > 0).astype(np.uint8) * 100, mode="L")  # ~39% opacity
-    color_img = Image.new("RGBA", (w, h), (255, 0, 0, 0))  # red overlay
-    color_img.putalpha(alpha)
-    composed = Image.alpha_composite(base_img, color_img)
+        alpha = Image.fromarray((mask_np > 0).astype(np.uint8) * 120, mode="L")
+        red_img = Image.new("RGBA", base_img.size, (255, 0, 0, 0))
+        red_img.putalpha(alpha)
 
-    if composed.width > thumb_w:
-        ratio = thumb_w / composed.width
-        composed = composed.resize((thumb_w, int(composed.height * ratio)), Image.BILINEAR)
+        composed = Image.alpha_composite(base_img, red_img)
 
-    buf = io.BytesIO()
-    composed.save(buf, format="PNG")
-    return base64.b64encode(buf.getvalue()).decode("utf-8")
+        buf = io.BytesIO()
+        composed.save(buf, format="PNG")
+        return base64.b64encode(buf.getvalue()).decode("utf-8")
+    except Exception as e:
+        print("Preview overlay failed:", e)
+        return None
 
-# ---- Combined thumbnail (each mask different color) ----
-def distinct_colors(n: int):
-    if n <= 0:
-        return []
-    hues = [i / n for i in range(n)]
-    return [
-        tuple(int(c * 255) for c in colorsys.hsv_to_rgb(h, 0.8, 1.0))
-        for h in hues
-    ]
-
-def make_combined_thumbnail(image_name: str, mask_paths: List[str], thumb_w: int = 320) -> str:
-    img_path = os.path.join(IMAGES_DIR, image_name)
-    base_img = Image.open(img_path).convert("RGBA")
-
-    masks: List[np.ndarray] = []
-    for p in mask_paths:
-        try:
-            masks.append(np.load(p))
-        except Exception:
-            pass
-
-    if not masks:
-        return ""
-
-    h, w = masks[0].shape[:2]
-    if base_img.size != (w, h):
-        base_img = base_img.resize((w, h), Image.BILINEAR)
-
-    colors = distinct_colors(len(masks))
-    overlay = Image.new("RGBA", (w, h), (0, 0, 0, 0))
-
-    for mask_np, color in zip(masks, colors):
-        alpha = Image.fromarray((mask_np > 0).astype(np.uint8) * 110, mode="L")  # slightly stronger
-        color_img = Image.new("RGBA", (w, h), color + (0,))
-        color_img.putalpha(alpha)
-        overlay = Image.alpha_composite(overlay, color_img)
-
-    composed = Image.alpha_composite(base_img, overlay)
-
-    if composed.width > thumb_w:
-        ratio = thumb_w / composed.width
-        composed = composed.resize((thumb_w, int(composed.height * ratio)), Image.BILINEAR)
-
-    buf = io.BytesIO()
-    composed.save(buf, format="PNG")
-    return base64.b64encode(buf.getvalue()).decode("utf-8")
-
-# ---- Logging helpers ----
 def _log_path(chunk_id: int) -> str:
     return os.path.join(LOGS_DIR, f"chunk_{chunk_id}.jsonl")
 
@@ -230,75 +181,48 @@ def load_processed(chunk_id: int) -> Dict[int, str]:
 # -------------------------
 @app.post("/click")
 def click(req: ClickRequest):
+    """
+    Generate a mask for a clicked point (single point).
+    Returns raw mask (not red overlay).
+    """
     mask_b64 = call_torchserve(req.image_name, [p.dict() for p in req.points])
     return {"mask_png_b64": mask_b64}
 
 @app.post("/preview")
 def preview(req: ClickRequest):
+    """
+    Generate a red overlay preview for hover.
+    """
     mask_b64 = call_torchserve(req.image_name, [p.dict() for p in req.points])
-    return {"mask_png_b64": mask_b64}
+    if not mask_b64:
+        return {"mask_png_b64": None}
+    overlay_b64 = make_preview_overlay(req.image_name, mask_b64)
+    return {"mask_png_b64": overlay_b64}
 
 @app.post("/save")
 def save(req: SaveRequest):
+    """
+    Save multiple masks at once.
+    """
     try:
-        mask_bytes = base64.b64decode(req.mask_png_b64)
+        mdir = mask_dir_for(req.image_name, req.query_id)
+        
+        saved_names = []
+        mask_b64=req.mask_png_b64
+        mask_bytes = base64.b64decode(mask_b64)
         mask_img = Image.open(io.BytesIO(mask_bytes)).convert("L")
         mask_np = np.array(mask_img)
-
-        mdir = mask_dir_for(req.image_name, req.query_id)
         mask_name = f"{random_id(10)}.npy"
         out_path = os.path.join(mdir, mask_name)
         np.save(out_path, mask_np)
 
         update_metadata(mdir, mask_name)
-        return {"status": "ok", "mask_name": mask_name}
+        saved_names.append(mask_name)
+
+        return {"status": "ok", "saved": saved_names}
     except Exception as e:
         return {"error": str(e)}
 
-@app.get("/masks")
-def list_masks(image_name: str = Query(...), query_id: int = Query(...)):
-    """
-    Return:
-      {
-        "combined_thumb_png_b64": "...",   # all masks layered, different colors
-        "masks": [{ name, thumb_png_b64 }, ...]  # individual thumbnails (red)
-      }
-    """
-    mdir = mask_dir_for(image_name, query_id)
-    names = load_meta(mdir)
-
-    items = []
-    mask_paths = []
-    for n in names:
-        mask_path = os.path.join(mdir, n)
-        if not os.path.exists(mask_path):
-            continue
-        mask_paths.append(mask_path)
-        try:
-            mask_np = np.load(mask_path)
-        except Exception:
-            continue
-        thumb_b64 = make_single_mask_thumbnail(image_name, mask_np)
-        items.append({"name": n, "thumb_png_b64": thumb_b64})
-
-    combined_b64 = make_combined_thumbnail(image_name, mask_paths) if mask_paths else ""
-
-    return {"combined_thumb_png_b64": combined_b64, "masks": items}
-
-@app.delete("/delete")
-def delete(req: DeleteRequest):
-    try:
-        mdir = mask_dir_for(req.image_name, req.query_id)
-        fpath = os.path.join(mdir, req.mask_name)
-        if os.path.exists(fpath):
-            os.remove(fpath)
-        names = [n for n in load_meta(mdir) if n != req.mask_name]
-        save_meta(mdir, names)
-        return {"status": "deleted"}
-    except Exception as e:
-        return {"error": str(e)}
-
-# ---- Logging endpoints ----
 @app.post("/log")
 def log_action(req: LogRequest):
     if req.action not in {"done", "skip"}:
