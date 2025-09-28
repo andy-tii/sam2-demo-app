@@ -28,7 +28,7 @@ const MAX_DISPLAY_H = 700;
 
 const HOVER_DELAY_MS = 200;
 const PREVIEW_MIN_MOVE = 5;
-const CLICK_MASK_DISPLAY_MS = 100;
+const CLICK_MASK_DISPLAY_MS = 400;
 
 export default function App() {
   const imgRef = useRef<HTMLImageElement | null>(null);
@@ -208,35 +208,36 @@ export default function App() {
 
   // hover → preview only
   const onMouseMove = (e: React.MouseEvent<HTMLImageElement>) => {
-    if (!currentExample || status === "Processing..." || !naturalSize || !displaySize) return;
-    const { imgX, imgY } = getCoords(e);
-    if (imgX < 0 || imgY < 0) {
-      setPreviewMask(null);
-      if (hoverTimer.current) clearTimeout(hoverTimer.current);
-      lastHoverPt.current = null;
-      return;
-    }
-    if (
-      lastHoverPt.current &&
-      Math.hypot(imgX - lastHoverPt.current.x, imgY - lastHoverPt.current.y) < PREVIEW_MIN_MOVE
-    ) return;
+  if (!currentExample || status === "Processing..." || !naturalSize || !displaySize) return;
 
-    lastHoverPt.current = { x: imgX, y: imgY };
-    if (hoverTimer.current) clearTimeout(hoverTimer.current);
-    hoverTimer.current = setTimeout(async () => {
-      try {
-        const data = await requestPreview({ x: imgX, y: imgY });
-        if (data.mask_png_b64) setPreviewMask(`data:image/png;base64,${data.mask_png_b64}`);
-      } finally {
-        if (status !== "Processing...") setStatus("Ready");
-      }
-    }, HOVER_DELAY_MS);
-  };
-
-  const onMouseLeave = () => {
+  const { imgX, imgY } = getCoords(e);
+  if (imgX < 0 || imgY < 0) {
     setPreviewMask(null);
     if (hoverTimer.current) clearTimeout(hoverTimer.current);
-  };
+    lastHoverPt.current = null;
+    return;
+  }
+
+  if (
+    lastHoverPt.current &&
+    Math.hypot(imgX - lastHoverPt.current.x, imgY - lastHoverPt.current.y) < PREVIEW_MIN_MOVE
+  ) return;
+
+  lastHoverPt.current = { x: imgX, y: imgY };
+  if (hoverTimer.current) clearTimeout(hoverTimer.current);
+
+  hoverTimer.current = setTimeout(async () => {
+    try {
+      setStatus("Previewing...");  // activate overlay during preview
+      const data = await requestPreview({ x: imgX, y: imgY });
+      if (data.mask_png_b64) {
+        setPreviewMask(`data:image/png;base64,${data.mask_png_b64}`);
+      }
+    } finally {
+      setStatus("Ready");  // return to ready when done
+    }
+  }, HOVER_DELAY_MS);
+};
 
   // ---------- UI ----------
   const chunk: Example[] = (metadata as any)[chunkId.toString()] || [];
@@ -429,7 +430,7 @@ export default function App() {
       </div>
 
       {/* Overlay only for Loading & Processing */}
-      {(status === "Loading image..." || status === "Processing...") && (
+      {(status === "Loading image..." || status === "Processing..." || status === "Previewing...") && (
         <div className="position-fixed top-0 start-0 w-100 h-100 d-flex justify-content-center align-items-center bg-white bg-opacity-50" style={{ zIndex: 9999, fontSize: 22, fontWeight: 800, color: "#1f2937", cursor: "wait" }}>
           {status}
         </div>
