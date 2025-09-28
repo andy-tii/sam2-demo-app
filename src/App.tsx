@@ -26,9 +26,9 @@ type Status = "Ready" | "Loading image..." | "Processing..." | "Previewing...";
 const MAX_DISPLAY_W = 1200;
 const MAX_DISPLAY_H = 700;
 
-const HOVER_DELAY_MS = 100;
+const HOVER_DELAY_MS = 200;
 const PREVIEW_MIN_MOVE = 2;
-const CLICK_MASK_DISPLAY_MS = 400;
+const CLICK_MASK_DISPLAY_MS = 100;
 
 export default function App() {
   const imgRef = useRef<HTMLImageElement | null>(null);
@@ -401,7 +401,7 @@ export default function App() {
         </div>
       </div>
 
-      {(status === "Loading image..." || status === "Processing...") && (
+      {(status === "Loading image..." || status === "Processing..." || status === "Previewing...") && (
         <div className="position-fixed top-0 start-0 w-100 h-100 d-flex justify-content-center align-items-center bg-white bg-opacity-50" style={{ zIndex: 9999, fontSize: 22, fontWeight: 800, color: "#1f2937", cursor: "wait" }}>{status}</div>
       )}
     </div>
