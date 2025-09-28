@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useRef, useState, useCallback, useMemo } from "react";
 import axios from "axios";
 import metadata from "./data/metadata.json";
 import "bootstrap/dist/css/bootstrap.min.css";
@@ -27,11 +27,18 @@ const MAX_DISPLAY_W = 1200;
 const MAX_DISPLAY_H = 900;
 
 // Configurable timers
-const HOVER_DELAY_MS = 100; // hover wait
-const CLICK_MASK_DISPLAY_MS = 200; // mask flash
+const HOVER_DELAY_MS = 100;
+const CLICK_MASK_DISPLAY_MS = 200;
+
+// Create axios instance with timeout
+const api = axios.create({
+  timeout: 10000,
+});
 
 export default function App() {
   const imgRef = useRef<HTMLImageElement | null>(null);
+  const hoverTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const abortController = useRef<AbortController | null>(null);
 
   // navigation
   const [chunkId, setChunkId] = useState<number>(0);
@@ -54,96 +61,51 @@ export default function App() {
   const [processed, setProcessed] = useState<Record<number, "done" | "skip">>({});
   const [jumpValue, setJumpValue] = useState<string>("");
 
-  const hoverTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  // --- helpers ---
-  const fetchProcessed = async (cid: number) => {
-    try {
-      const res = await axios.get("/status", { params: { chunk_id: cid } });
-      const obj = (res.data?.processed || {}) as Record<string, "done" | "skip">;
-      const map: Record<number, "done" | "skip"> = {};
-      for (const k of Object.keys(obj)) map[parseInt(k, 10)] = obj[k];
-      setProcessed(map);
-    } catch {
-      setProcessed({});
-    }
-  };
-
-  const jumpToNextUnprocessed = () => {
-    const list: Example[] = (metadata as any)[chunkId.toString()] || [];
-    if (!list.length) return;
-    for (let i = exampleIdx + 1; i < list.length; i++) {
-      if (!(i in processed)) {
-        setExampleIdx(i);
-        return;
-      }
-    }
-    for (let i = 0; i < list.length; i++) {
-      if (!(i in processed)) {
-        setExampleIdx(i);
-        return;
-      }
-    }
-  };
-
-  const goToExample = () => {
-    const list: Example[] = (metadata as any)[chunkId.toString()] || [];
-    if (!list.length) return;
-    let n = parseInt(jumpValue, 10);
-    if (Number.isNaN(n)) return;
-    n = Math.max(1, Math.min(n, list.length));
-    setExampleIdx(n - 1);
-  };
-
-  // effects
-  useEffect(() => {
-    fetchProcessed(chunkId);
+  // Memoize computed values
+  const chunk = useMemo(() => {
+    return (metadata as any)[chunkId.toString()] || [];
   }, [chunkId]);
 
-  useEffect(() => {
-    const list: Example[] = (metadata as any)[chunkId.toString()] || [];
-    let idx = exampleIdx;
-    if (idx >= list.length) {
-      idx = 0;
-      setExampleIdx(0);
-    }
-    const ex = list[idx] || null;
-    setCurrentExample(ex);
+  const maxExamples = chunk.length;
 
-    setMasks([]);
-    setTempMask(null);
-    setPreviewMask(null);
-    setShowAllMasks(false);
-    setNaturalSize(null);
-    setDisplaySize(null);
-    setScale(1);
-    setStatus("Loading image...");
-    setImageKey((k) => k + 1);
-  }, [chunkId, exampleIdx]);
+  const sortedChunkIds = useMemo(() => {
+    return Object.keys(metadata)
+      .map(Number)
+      .sort((a, b) => a - b);
+  }, []);
 
-  // helpers
-  const computeDisplayFromNatural = (nw: number, nh: number) => {
-    const s = Math.min(1, MAX_DISPLAY_W / nw, MAX_DISPLAY_H / nh);
-    return { w: Math.round(nw * s), h: Math.round(nh * s), s };
-  };
-
-  const getCoords = (e: React.MouseEvent<HTMLImageElement>) => {
+  // Optimize coordinate calculation
+  const getCoords = useCallback((e: React.MouseEvent<HTMLImageElement>) => {
     const img = imgRef.current;
     if (!img || !naturalSize || !displaySize) return { imgX: -1, imgY: -1 };
+    
     const rect = img.getBoundingClientRect();
     const dispX = e.clientX - rect.left;
     const dispY = e.clientY - rect.top;
+    
     if (dispX < 0 || dispY < 0 || dispX > rect.width || dispY > rect.height) {
       return { imgX: -1, imgY: -1 };
     }
+    
     const imgX = Math.round(dispX / scale);
     const imgY = Math.round(dispY / scale);
     return { imgX, imgY };
-  };
+  }, [naturalSize, displaySize, scale]);
 
-  // API helpers
-  async function requestCommit(pt: ImgPt) {
-    const res = await axios.post("/click", {
+  // Optimize display size calculation
+  const computeDisplayFromNatural = useCallback((nw: number, nh: number) => {
+    const s = Math.min(1, MAX_DISPLAY_W / nw, MAX_DISPLAY_H / nh);
+    return { w: Math.round(nw * s), h: Math.round(nh * s), s };
+  }, []);
+
+  // Optimized API helpers with abort controller
+  const requestCommit = useCallback(async (pt: ImgPt) => {
+    if (abortController.current) {
+      abortController.current.abort();
+    }
+    abortController.current = new AbortController();
+
+    const res = await api.post("/click", {
       chunk_id: chunkId,
       index: exampleIdx,
       image_name: currentExample?.image_name,
@@ -151,12 +113,18 @@ export default function App() {
       width: naturalSize?.w,
       height: naturalSize?.h,
       points: [{ ...pt, label: 1 }],
-    });
+    }, { signal: abortController.current.signal });
+    
     return res.data;
-  }
+  }, [chunkId, exampleIdx, currentExample, naturalSize]);
 
-  async function requestPreview(pt: ImgPt) {
-    const res = await axios.post("/preview", {
+  const requestPreview = useCallback(async (pt: ImgPt) => {
+    if (abortController.current) {
+      abortController.current.abort();
+    }
+    abortController.current = new AbortController();
+
+    const res = await api.post("/preview", {
       chunk_id: chunkId,
       index: exampleIdx,
       image_name: currentExample?.image_name,
@@ -164,22 +132,23 @@ export default function App() {
       width: naturalSize?.w,
       height: naturalSize?.h,
       points: [{ ...pt, label: 1 }],
-    });
+    }, { signal: abortController.current.signal });
+    
     return res.data;
-  }
+  }, [chunkId, exampleIdx, currentExample, naturalSize]);
 
-  async function requestSave(mask: string, imageName: string, queryId: number) {
+  const requestSave = useCallback(async (mask: string, imageName: string, queryId: number) => {
     const b64 = mask.replace(/^data:image\/png;base64,/, "");
-    const res = await axios.post("/save", {
+    const res = await api.post("/save", {
       image_name: imageName,
       query_id: queryId,
       mask_png_b64: b64,
     });
     return res.data;
-  }
+  }, []);
 
-  async function logAction(action: "done" | "skip") {
-    await axios.post("/log", {
+  const logAction = useCallback(async (action: "done" | "skip") => {
+    await api.post("/log", {
       chunk_id: chunkId,
       index: exampleIdx,
       image_name: currentExample?.image_name,
@@ -187,13 +156,106 @@ export default function App() {
       action,
     });
     setProcessed((prev) => ({ ...prev, [exampleIdx]: action }));
-  }
+  }, [chunkId, exampleIdx, currentExample]);
 
-  // click
-  const onImageClick = async (e: React.MouseEvent<HTMLImageElement>) => {
+  const fetchProcessed = useCallback(async (cid: number) => {
+    try {
+      const res = await api.get("/status", { params: { chunk_id: cid } });
+      const obj = (res.data?.processed || {}) as Record<string, "done" | "skip">;
+      const map: Record<number, "done" | "skip"> = {};
+      for (const k of Object.keys(obj)) {
+        map[parseInt(k, 10)] = obj[k];
+      }
+      setProcessed(map);
+    } catch (error) {
+      if (!axios.isCancel(error)) {
+        setProcessed({});
+      }
+    }
+  }, []);
+
+  const jumpToNextUnprocessed = useCallback(() => {
+    if (!chunk.length) return;
+    
+    // Check examples after current index first
+    for (let i = exampleIdx + 1; i < chunk.length; i++) {
+      if (!(i in processed)) {
+        setExampleIdx(i);
+        return;
+      }
+    }
+    
+    // Then check from beginning
+    for (let i = 0; i < chunk.length; i++) {
+      if (!(i in processed)) {
+        setExampleIdx(i);
+        return;
+      }
+    }
+  }, [chunk.length, exampleIdx, processed]);
+
+  const goToExample = useCallback(() => {
+    if (!chunk.length) return;
+    
+    const n = parseInt(jumpValue, 10);
+    if (Number.isNaN(n)) return;
+    
+    const clampedN = Math.max(1, Math.min(n, chunk.length));
+    setExampleIdx(clampedN - 1);
+  }, [jumpValue, chunk.length]);
+
+  // Debounced mouse move handler
+  const onMouseMove = useCallback((e: React.MouseEvent<HTMLImageElement>) => {
     if (!currentExample || status === "Processing..." || !naturalSize || !displaySize) return;
+    
+    const { imgX, imgY } = getCoords(e);
+    if (imgX < 0 || imgY < 0) {
+      setPreviewMask(null);
+      if (hoverTimer.current) {
+        clearTimeout(hoverTimer.current);
+        hoverTimer.current = null;
+      }
+      return;
+    }
+
+    if (hoverTimer.current) {
+      clearTimeout(hoverTimer.current);
+    }
+
+    hoverTimer.current = setTimeout(async () => {
+      setStatus("Previewing...");
+      try {
+        const data = await requestPreview({ x: imgX, y: imgY });
+        if (data.mask_png_b64) {
+          setPreviewMask(`data:image/png;base64,${data.mask_png_b64}`);
+        }
+      } catch (error) {
+        if (!axios.isCancel(error)) {
+          console.error("Preview request failed:", error);
+        }
+      } finally {
+        setStatus(prev => prev !== "Processing..." ? "Ready" : prev);
+      }
+    }, HOVER_DELAY_MS);
+  }, [currentExample, status, naturalSize, displaySize, getCoords, requestPreview]);
+
+  const onMouseLeave = useCallback(() => {
+    setPreviewMask(null);
+    if (hoverTimer.current) {
+      clearTimeout(hoverTimer.current);
+      hoverTimer.current = null;
+    }
+    if (status === "Previewing...") {
+      setStatus("Ready");
+    }
+  }, [status]);
+
+  const onImageClick = useCallback(async (e: React.MouseEvent<HTMLImageElement>) => {
+    if (!currentExample || status === "Processing..." || !naturalSize || !displaySize) return;
+    
     const { imgX, imgY } = getCoords(e);
     if (imgX < 0 || imgY < 0) return;
+
     setStatus("Processing...");
     try {
       const data = await requestCommit({ x: imgX, y: imgY });
@@ -203,44 +265,133 @@ export default function App() {
         setTempMask(maskData);
         setTimeout(() => setTempMask(null), CLICK_MASK_DISPLAY_MS);
       }
+    } catch (error) {
+      if (!axios.isCancel(error)) {
+        console.error("Click request failed:", error);
+      }
     } finally {
       setStatus("Ready");
     }
-  };
+  }, [currentExample, status, naturalSize, displaySize, getCoords, requestCommit]);
 
-  // hover
-  const onMouseMove = (e: React.MouseEvent<HTMLImageElement>) => {
-    if (!currentExample || status === "Processing..." || !naturalSize || !displaySize) return;
-    const { imgX, imgY } = getCoords(e);
-    if (imgX < 0 || imgY < 0) {
-      setPreviewMask(null);
-      if (hoverTimer.current) clearTimeout(hoverTimer.current);
-      return;
+  // Optimized handlers
+  const handleChunkChange = useCallback((e: React.ChangeEvent<HTMLSelectElement>) => {
+    if (status === "Processing...") return;
+    setChunkId(parseInt(e.target.value, 10));
+    setExampleIdx(0);
+    setJumpValue("");
+  }, [status]);
+
+  const handlePrevious = useCallback(() => {
+    if (exampleIdx > 0 && status !== "Processing...") {
+      setExampleIdx(i => i - 1);
     }
-    if (hoverTimer.current) clearTimeout(hoverTimer.current);
-    hoverTimer.current = setTimeout(async () => {
-      setStatus("Previewing...");
-      try {
-        const data = await requestPreview({ x: imgX, y: imgY });
-        if (data.mask_png_b64) {
-          setPreviewMask(`data:image/png;base64,${data.mask_png_b64}`);
-        }
-      } finally {
-        if (status !== "Processing...") setStatus("Ready");
-      }
-    }, HOVER_DELAY_MS);
-  };
+  }, [exampleIdx, status]);
 
-  const onMouseLeave = () => {
+  const handleNext = useCallback(() => {
+    if (exampleIdx < chunk.length - 1 && status !== "Processing...") {
+      setExampleIdx(i => i + 1);
+    }
+  }, [exampleIdx, chunk.length, status]);
+
+  const handleFinish = useCallback(async () => {
+    if (!currentExample || masks.length === 0) return;
+    
+    setStatus("Processing...");
+    try {
+      // Process saves in parallel for better performance
+      await Promise.all(
+        masks.map(mask => requestSave(mask, currentExample.image_name, currentExample.query_id))
+      );
+      await logAction("done");
+      setMasks([]);
+      jumpToNextUnprocessed();
+    } catch (error) {
+      console.error("Finish operation failed:", error);
+    } finally {
+      setStatus("Ready");
+    }
+  }, [currentExample, masks, requestSave, logAction, jumpToNextUnprocessed]);
+
+  const handleSkip = useCallback(async () => {
+    if (!currentExample) return;
+    
+    setStatus("Processing...");
+    try {
+      await logAction("skip");
+      setMasks([]);
+      jumpToNextUnprocessed();
+    } catch (error) {
+      console.error("Skip operation failed:", error);
+    } finally {
+      setStatus("Ready");
+    }
+  }, [currentExample, logAction, jumpToNextUnprocessed]);
+
+  const handleImageLoad = useCallback((e: React.SyntheticEvent<HTMLImageElement>) => {
+    const target = e.currentTarget;
+    const nw = target.naturalWidth;
+    const nh = target.naturalHeight;
+    setNaturalSize({ w: nw, h: nh });
+    
+    const { w, h, s } = computeDisplayFromNatural(nw, nh);
+    setDisplaySize({ w, h });
+    setScale(s);
+    setStatus("Ready");
+  }, [computeDisplayFromNatural]);
+
+  // Effects
+  useEffect(() => {
+    fetchProcessed(chunkId);
+  }, [chunkId, fetchProcessed]);
+
+  useEffect(() => {
+    let idx = exampleIdx;
+    if (idx >= chunk.length) {
+      idx = 0;
+      setExampleIdx(0);
+    }
+    
+    const ex = chunk[idx] || null;
+    setCurrentExample(ex);
+
+    // Reset state
+    setMasks([]);
+    setTempMask(null);
     setPreviewMask(null);
-    if (hoverTimer.current) clearTimeout(hoverTimer.current);
-    if (status === "Previewing...") setStatus("Ready");
-  };
+    setShowAllMasks(false);
+    setNaturalSize(null);
+    setDisplaySize(null);
+    setScale(1);
+    setStatus("Loading image...");
+    setImageKey((k) => k + 1);
 
-  // ---------- UI ----------
-  const chunk: Example[] = (metadata as any)[chunkId.toString()] || [];
-  const example = currentExample;
-  const maxExamples = chunk.length;
+    // Clear any pending timers
+    if (hoverTimer.current) {
+      clearTimeout(hoverTimer.current);
+      hoverTimer.current = null;
+    }
+
+    // Abort any pending requests
+    if (abortController.current) {
+      abortController.current.abort();
+    }
+  }, [chunkId, exampleIdx, chunk]);
+
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      if (hoverTimer.current) {
+        clearTimeout(hoverTimer.current);
+      }
+      if (abortController.current) {
+        abortController.current.abort();
+      }
+    };
+  }, []);
+
+  const isProcessing = status === "Processing...";
+  const canNavigate = !isProcessing && chunk.length > 0;
 
   return (
     <div className="d-flex flex-column min-vh-100">
@@ -254,41 +405,36 @@ export default function App() {
                 className="form-select"
                 style={{ minWidth: 160 }}
                 value={chunkId}
-                onChange={(e) => {
-                  if (status === "Processing...") return;
-                  setChunkId(parseInt(e.target.value, 10));
-                  setExampleIdx(0);
-                  setJumpValue("");
-                }}
-                disabled={status === "Processing..."}
+                onChange={handleChunkChange}
+                disabled={isProcessing}
               >
-                {Object.keys(metadata)
-                  .map(Number)
-                  .sort((a, b) => a - b)
-                  .map((cid) => {
-                    const label = CHUNK_LABELS[String(cid)] ?? `Chunk ${cid}`;
-                    return (
-                      <option key={cid} value={cid}>
-                        {label}
-                      </option>
-                    );
-                  })}
+                {sortedChunkIds.map((cid) => {
+                  const label = CHUNK_LABELS[String(cid)] ?? `Chunk ${cid}`;
+                  return (
+                    <option key={cid} value={cid}>
+                      {label}
+                    </option>
+                  );
+                })}
               </select>
             </div>
+            
             <button
               className="btn btn-outline-primary"
-              disabled={exampleIdx === 0 || status === "Processing..."}
-              onClick={() => setExampleIdx((i) => i - 1)}
+              disabled={exampleIdx === 0 || !canNavigate}
+              onClick={handlePrevious}
             >
               ← Previous
             </button>
+            
             <button
               className="btn btn-outline-primary"
-              disabled={!chunk.length || exampleIdx >= chunk.length - 1 || status === "Processing..."}
-              onClick={() => setExampleIdx((i) => i + 1)}
+              disabled={exampleIdx >= chunk.length - 1 || !canNavigate}
+              onClick={handleNext}
             >
               Next →
             </button>
+            
             <div className="input-group ms-2" style={{ width: 160 }}>
               <span className="input-group-text">Jump</span>
               <input
@@ -297,80 +443,69 @@ export default function App() {
                 value={jumpValue}
                 onChange={(e) => setJumpValue(e.target.value)}
                 onKeyDown={(e) => e.key === "Enter" && goToExample()}
-                disabled={!maxExamples || status === "Processing..."}
+                disabled={!canNavigate}
+                min={1}
+                max={maxExamples}
               />
-              <button className="btn btn-success" onClick={goToExample} disabled={!maxExamples || status === "Processing..."}>
+              <button
+                className="btn btn-success"
+                onClick={goToExample}
+                disabled={!canNavigate}
+              >
                 Go
               </button>
             </div>
           </div>
+          
           <div className="border rounded px-3 py-2 bg-white text-end">
             <div>
-              Progress: <strong>Query {chunk.length ? `${exampleIdx + 1}/${chunk.length}` : ""}</strong>
+              Progress: <strong>Query {maxExamples ? `${exampleIdx + 1}/${maxExamples}` : ""}</strong>
             </div>
           </div>
         </div>
       </div>
 
       {/* Controls above image */}
-      {example && (
+      {currentExample && (
         <div className="container my-2">
           <div className="d-flex flex-wrap justify-content-between align-items-center border rounded p-2 bg-light">
             <div>
-              <div><strong>Query:</strong> {example.query}</div>
-              <div><strong>Query ID:</strong> {example.query_id}</div>
+              <div><strong>Query:</strong> {currentExample.query}</div>
+              <div><strong>Query ID:</strong> {currentExample.query_id}</div>
               <div><strong>Level:</strong> {CHUNK_LABELS[String(chunkId)] ?? chunkId}</div>
             </div>
+            
             <div className="d-flex gap-2 align-items-center">
               <div><strong>Masks selected:</strong> {masks.length}</div>
+              
               <button
                 className="btn btn-info"
-                onClick={() => setShowAllMasks((v) => !v)}
-                disabled={!example || masks.length === 0}
+                onClick={() => setShowAllMasks(v => !v)}
+                disabled={!currentExample || masks.length === 0}
               >
                 {showAllMasks ? "Hide Masks" : "View Masks"}
               </button>
+              
               <button
                 className="btn btn-warning"
                 onClick={() => setMasks([])}
-                disabled={!example || masks.length === 0}
+                disabled={!currentExample || masks.length === 0}
               >
                 Clear All ✕
               </button>
+              
               <button
                 className="btn btn-success"
-                onClick={async () => {
-                  if (!currentExample || masks.length === 0) return;
-                  setStatus("Processing...");
-                  try {
-                    for (const m of masks) {
-                      await requestSave(m, currentExample.image_name, currentExample.query_id);
-                    }
-                    await logAction("done");
-                    setMasks([]);
-                    jumpToNextUnprocessed();
-                  } finally {
-                    setStatus("Ready");
-                  }
-                }}
-                disabled={!example || masks.length === 0 || status !== "Ready"}
+                onClick={handleFinish}
+                disabled={!currentExample || masks.length === 0 || status !== "Ready"}
               >
                 Finish ✓
               </button>
+              
               <button
                 className="btn btn-secondary"
-                onClick={async () => {
-                  if (!currentExample) return;
-                  setStatus("Processing...");
-                  try {
-                    await logAction("skip");
-                    setMasks([]);
-                    jumpToNextUnprocessed();
-                  } finally {
-                    setStatus("Ready");
-                  }
-                }}
-                disabled={!example || status !== "Ready"}
+                onClick={handleSkip}
+                disabled={!currentExample || status !== "Ready"}
               >
                 Skip ↷
               </button>
@@ -383,7 +518,7 @@ export default function App() {
       <div className="container flex-grow-1 mb-3">
         <div className="row g-3">
           <div className="col-lg-12 d-flex justify-content-center">
-            {example && (
+            {currentExample && (
               <div
                 style={{
                   position: "relative",
@@ -394,60 +529,67 @@ export default function App() {
                 <img
                   key={imageKey}
                   ref={imgRef}
-                  src={`/images/${example.image_name}`}
-                  alt={example.image_name}
+                  src={`/images/${currentExample.image_name}`}
+                  alt={currentExample.image_name}
                   className="img-fluid border"
                   style={{
                     width: displaySize ? "100%" : undefined,
                     height: displaySize ? "100%" : undefined,
                     objectFit: "contain",
-                    opacity: status === "Processing..." ? 0.6 : 1,
-                    pointerEvents: status === "Processing..." ? "none" : "auto",
+                    opacity: isProcessing ? 0.6 : 1,
+                    pointerEvents: isProcessing ? "none" : "auto",
+                    transition: "opacity 0.2s ease",
                   }}
-                  onLoad={(e) => {
-                    const t = e.currentTarget;
-                    const nw = t.naturalWidth;
-                    const nh = t.naturalHeight;
-                    setNaturalSize({ w: nw, h: nh });
-                    const { w, h, s } = computeDisplayFromNatural(nw, nh);
-                    setDisplaySize({ w, h });
-                    setScale(s);
-                    setStatus("Ready");
-                  }}
+                  onLoad={handleImageLoad}
                   onClick={onImageClick}
                   onMouseMove={onMouseMove}
                   onMouseLeave={onMouseLeave}
+                  loading="eager"
                 />
 
-                {/* temp mask flash */}
+                {/* Temp mask flash */}
                 {tempMask && displaySize && (
                   <img
                     src={tempMask}
                     alt="mask"
                     className="position-absolute top-0 start-0 w-100 h-100"
-                    style={{ objectFit: "contain", pointerEvents: "none" }}
+                    style={{ 
+                      objectFit: "contain", 
+                      pointerEvents: "none",
+                      transition: "opacity 0.2s ease"
+                    }}
                   />
                 )}
 
-                {/* hover preview */}
+                {/* Hover preview */}
                 {previewMask && displaySize && (
                   <img
                     src={previewMask}
                     alt="preview-mask"
                     className="position-absolute top-0 start-0 w-100 h-100"
-                    style={{ objectFit: "contain", pointerEvents: "none", opacity: 0.7 }}
+                    style={{ 
+                      objectFit: "contain", 
+                      pointerEvents: "none", 
+                      opacity: 0.7,
+                      transition: "opacity 0.15s ease"
+                    }}
                   />
                 )}
 
-                {/* show all masks */}
+                {/* Show all masks */}
                 {showAllMasks &&
-                  masks.map((m, i) => (
+                  masks.map((mask, i) => (
                     <img
                       key={`mask-${i}`}
-                      src={m}
+                      src={mask}
                       alt={`mask-${i}`}
                       className="position-absolute top-0 start-0 w-100 h-100"
-                      style={{ objectFit: "contain", pointerEvents: "none", opacity: 0.5 }}
+                      style={{ 
+                        objectFit: "contain", 
+                        pointerEvents: "none", 
+                        opacity: 0.5,
+                        transition: "opacity 0.2s ease"
+                      }}
                     />
                   ))}
               </div>
@@ -459,8 +601,16 @@ export default function App() {
       {/* Status overlay */}
       {(status === "Loading image..." || status === "Processing..." || status === "Previewing...") && (
         <div
-          className="position-fixed top-0 start-0 w-100 h-100 d-flex justify-content-center align-items-center bg-white bg-opacity-50"
-          style={{ zIndex: 9999, fontSize: 22, fontWeight: 800, color: "#1f2937", cursor: "wait" }}
+          className="position-fixed top-0 start-0 w-100 h-100 d-flex justify-content-center align-items-center"
+          style={{ 
+            zIndex: 9999, 
+            fontSize: 22, 
+            fontWeight: 800, 
+            color: "#1f2937", 
+            cursor: "wait",
+            backgroundColor: "rgba(255, 255, 255, 0.8)",
+            backdropFilter: "blur(2px)"
+          }}
         >
           {status}
         </div>
