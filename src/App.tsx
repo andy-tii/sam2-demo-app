@@ -27,7 +27,7 @@ const MAX_DISPLAY_W = 1200;
 const MAX_DISPLAY_H = 900;
 
 // Configurable timers
-const HOVER_DELAY_MS = 10;
+const HOVER_DELAY_MS = 200;
 const CLICK_MASK_DISPLAY_MS = 200;
 
 // Create axios instance with timeout
@@ -223,12 +223,12 @@ const onMouseMove = useCallback((e: React.MouseEvent<HTMLImageElement>) => {
   }
 
   hoverTimer.current = setTimeout(async () => {
-    console.time("preview-request"); // start timer
+    // console.time("preview-request"); // start timer
     setStatus("Previewing...");
     try {
       console.log("Sending preview request at coords:", imgX, imgY);
       const data = await requestPreview({ x: imgX, y: imgY });
-      console.timeEnd("preview-request"); // end timer
+      // console.timeEnd("preview-request"); // end timer
       if (data.mask_png_b64) {
         setPreviewMask(`data:image/png;base64,${data.mask_png_b64}`);
       }
@@ -643,20 +643,19 @@ const onMouseMove = useCallback((e: React.MouseEvent<HTMLImageElement>) => {
 
                 {/* Show all masks */}
                 {showAllMasks &&
-                  masks.map((mask, i) => (
-                    <img
-                      key={`mask-${i}`}
-                      src={mask}
-                      alt={`mask-${i}`}
-                      className="position-absolute top-0 start-0 w-100 h-100"
-                      style={{ 
-                        objectFit: "contain", 
-                        pointerEvents: "none", 
-                        opacity: 0.5,
-                        transition: "opacity 0.2s ease"
-                      }}
-                    />
-                  ))}
+                masks.map((mask, i) => (
+                  <img
+                    key={`mask-${i}`}
+                    src={mask}
+                    alt={`mask-${i}`}
+                    className="position-absolute top-0 start-0 w-100 h-100"
+                    style={{ 
+                      objectFit: "contain", 
+                      pointerEvents: "none", 
+                      opacity: 0.5,
+                    }}
+                  />
+                ))}
               </div>
             )}
           </div>
